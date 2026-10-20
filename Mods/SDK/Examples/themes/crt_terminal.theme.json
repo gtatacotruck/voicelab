@@ -1,0 +1,13 @@
+{
+    "name": "CRT Terminal",
+    "bg": "#000500",
+    "panel": "#030f03",
+    "panelAlt": "#061a06",
+    "stroke": "#0f3a0f",
+    "accent": "#33ff33",
+    "accentDim": "#1a991a",
+    "accentGlow": "#5533ff33",
+    "text": "#d0ffd0",
+    "textDim": "#5fa85f",
+    "danger": "#ff4444"
+}

@@ -1,0 +1,13 @@
+{
+    "name": "Frosted Glass",
+    "bg": "#0a0e14",
+    "panel": "#16202e",
+    "panelAlt": "#1c2836",
+    "stroke": "#3a4a5e",
+    "accent": "#6fc7ff",
+    "accentDim": "#3a7ca8",
+    "accentGlow": "#886fc7ff",
+    "text": "#eaf4ff",
+    "textDim": "#93a8bc",
+    "danger": "#ff6f6f"
+}

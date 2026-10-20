@@ -1,0 +1,25 @@
+{
+    "name": "Hover & Cursor Demo",
+    "bg": "#0a0a0a",
+    "panel": "#121212",
+    "panelAlt": "#181818",
+    "stroke": "#2a2a2a",
+    "accent": "#2ee66b",
+    "accentDim": "#1d8a45",
+    "accentGlow": "#552ee66b",
+    "text": "#e8f5ec",
+    "textDim": "#8fa398",
+    "danger": "#e6543f",
+
+    "textHover": "#7dffb0",
+    "buttonHover": "#20301f",
+    "sliderThumb": "#7dffb0",
+    "scrollbarThumb": "#1d8a45",
+    "tooltipBg": "#0f1f14",
+    "tooltipText": "#7dffb0",
+    "selectionBg": "#552ee66b",
+    "linkColour": "#7dffb0",
+    "focusRing": "#7dffb0",
+
+    "cursorStyle": "hand"
+}

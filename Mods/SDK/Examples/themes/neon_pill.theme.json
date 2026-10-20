@@ -1,0 +1,13 @@
+{
+    "name": "Neon Pill",
+    "bg": "#08050c",
+    "panel": "#120a1c",
+    "panelAlt": "#1a1028",
+    "stroke": "#3a2350",
+    "accent": "#ff2ea6",
+    "accentDim": "#991a66",
+    "accentGlow": "#88ff2ea6",
+    "text": "#f8e8ff",
+    "textDim": "#b08ac4",
+    "danger": "#3ffff0"
+}

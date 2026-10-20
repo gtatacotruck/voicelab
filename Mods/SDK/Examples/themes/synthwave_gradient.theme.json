@@ -1,0 +1,14 @@
+{
+    "name": "Synthwave Gradient",
+    "bg": "#0a0518",
+    "panel": "#150a28",
+    "panelAlt": "#1e1038",
+    "stroke": "#3a2358",
+    "accent": "#ff2ea6",
+    "accentDim": "#991a66",
+    "accentGlow": "#88ff2ea6",
+    "text": "#f8e8ff",
+    "textDim": "#b08ac4",
+    "danger": "#ff5c5c",
+    "accent2": "#3fa6ff"
+}

@@ -1,0 +1,13 @@
+{
+    "name": "Sharp & Flat",
+    "bg": "#0a0a0c",
+    "panel": "#141416",
+    "panelAlt": "#1c1c1f",
+    "stroke": "#333338",
+    "accent": "#5c8dff",
+    "accentDim": "#3a5aa3",
+    "accentGlow": "#005c8dff",
+    "text": "#f0f0f2",
+    "textDim": "#8a8a90",
+    "danger": "#ff5c5c"
+}
