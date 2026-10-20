@@ -1,0 +1,13 @@
+{
+    "name": "Amber Terminal",
+    "bg": "#0f0a04",
+    "panel": "#1a1208",
+    "panelAlt": "#241a0c",
+    "stroke": "#3f2f14",
+    "accent": "#ffb020",
+    "accentDim": "#a3701a",
+    "accentGlow": "#55ffb020",
+    "text": "#fff2d8",
+    "textDim": "#c2a878",
+    "danger": "#ff4f4f"
+}
