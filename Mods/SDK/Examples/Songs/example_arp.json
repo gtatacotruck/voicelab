@@ -1,0 +1,10 @@
+{
+  "loop": true,
+  "steps": [
+    { "note": "C4", "dur": 0.25, "vel": 0.9, "rest": false },
+    { "note": "E4", "dur": 0.25, "vel": 0.9, "rest": false },
+    { "note": "G4", "dur": 0.25, "vel": 0.9, "rest": false },
+    { "note": "C5", "dur": 0.25, "vel": 1.0, "rest": false },
+    { "note": "C4", "dur": 0.125, "vel": 0.0, "rest": true }
+  ]
+}
