@@ -1,0 +1,33 @@
+{
+  "name": "Deutsch",
+  "strings": {
+    "boardTab": "Board",
+    "fxRackTab": "Effekte",
+    "settingsTab": "Einstellungen",
+    "visualizerTab": "Visualisierer",
+    "modsTab": "Mods",
+    "synthTab": "Synth",
+    "themeCreatorTab": "Themen",
+    "ttsTab": "Sprache",
+    "importButton": "Importieren",
+    "stopAllSounds": "Alle Sounds Stoppen",
+    "stopSong": "Song Stoppen",
+    "reloadSongs": "Songs Neu Laden",
+    "refreshDevices": "Geräte Aktualisieren",
+    "startEngine": "Engine Starten",
+    "fxReset": "Effekte Zurücksetzen",
+    "fxSavePreset": "Preset Speichern...",
+    "fxDeletePreset": "Löschen",
+    "setRecordHotkey": "Aufnahme-Taste Festlegen",
+    "chooseStartupSound": "Start-Sound Wählen...",
+    "loadBackground": "Hintergrund/GIF Laden",
+    "clearBackground": "Hintergrund Entfernen",
+    "openRecordingsFolder": "Aufnahmeordner Öffnen",
+    "reloadAllMods": "Alle Mods Neu Laden",
+    "openModsFolder": "Mods-Ordner Öffnen",
+    "synthPlay": "Song Abspielen",
+    "synthStop": "Song/Note Stoppen",
+    "speak": "Sprechen",
+    "stopTts": "Sprache Stoppen"
+  }
+}

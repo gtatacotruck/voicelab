@@ -1,0 +1,33 @@
+{
+  "name": "日本語",
+  "strings": {
+    "boardTab": "ボード",
+    "fxRackTab": "エフェクト",
+    "settingsTab": "設定",
+    "visualizerTab": "ビジュアライザー",
+    "modsTab": "MOD",
+    "synthTab": "シンセ",
+    "themeCreatorTab": "テーマ",
+    "ttsTab": "音声",
+    "importButton": "インポート",
+    "stopAllSounds": "全音停止",
+    "stopSong": "曲を停止",
+    "reloadSongs": "曲を再読込",
+    "refreshDevices": "デバイス更新",
+    "startEngine": "エンジン起動",
+    "fxReset": "エフェクトをリセット",
+    "fxSavePreset": "プリセット保存...",
+    "fxDeletePreset": "削除",
+    "setRecordHotkey": "録音ホットキー設定",
+    "chooseStartupSound": "起動音を選択...",
+    "loadBackground": "背景/GIF読込",
+    "clearBackground": "背景を消去",
+    "openRecordingsFolder": "録音フォルダを開く",
+    "reloadAllMods": "全MOD再読込",
+    "openModsFolder": "MODフォルダを開く",
+    "synthPlay": "曲を再生",
+    "synthStop": "曲/音停止",
+    "speak": "話す",
+    "stopTts": "音声停止"
+  }
+}

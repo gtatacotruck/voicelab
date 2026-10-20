@@ -1,0 +1,33 @@
+{
+  "name": "Pirate",
+  "strings": {
+    "boardTab": "Th' Deck",
+    "fxRackTab": "Th' Rigging",
+    "settingsTab": "Cap'n's Orders",
+    "visualizerTab": "Spyglass",
+    "modsTab": "Th' Booty",
+    "synthTab": "Sea Shanty",
+    "themeCreatorTab": "Colours",
+    "ttsTab": "Parrot Talk",
+    "importButton": "Plunder",
+    "stopAllSounds": "Batten Down th' Hatches",
+    "stopSong": "Drop Anchor",
+    "reloadSongs": "Restock th' Shanties",
+    "refreshDevices": "Scout th' Horizon",
+    "startEngine": "Hoist th' Sails",
+    "fxReset": "Scuttle th' Rigging",
+    "fxSavePreset": "Bury th' Treasure...",
+    "fxDeletePreset": "Walk th' Plank",
+    "setRecordHotkey": "Mark th' Trigger",
+    "chooseStartupSound": "Pick a Battle Cry...",
+    "loadBackground": "Hang a Sea Chart/GIF",
+    "clearBackground": "Toss th' Chart Overboard",
+    "openRecordingsFolder": "Open th' Treasure Chest",
+    "reloadAllMods": "Careen th' Whole Ship",
+    "openModsFolder": "Open th' Cargo Hold",
+    "synthPlay": "Sing th' Shanty",
+    "synthStop": "Silence th' Crew",
+    "speak": "Squawk",
+    "stopTts": "Silence th' Parrot"
+  }
+}

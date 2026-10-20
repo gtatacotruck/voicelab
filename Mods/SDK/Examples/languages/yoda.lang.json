@@ -1,0 +1,33 @@
+{
+  "name": "Yoda",
+  "strings": {
+    "boardTab": "Board, You Seek",
+    "fxRackTab": "Effects, Powerful",
+    "settingsTab": "Settings, Wise You Must Be",
+    "visualizerTab": "Vision, See You Will",
+    "modsTab": "Mods, Strong With These",
+    "synthTab": "Synth, Hmm",
+    "themeCreatorTab": "Themes, Choose Wisely",
+    "ttsTab": "Speak It Does",
+    "importButton": "Bring It, You Must",
+    "stopAllSounds": "Silence, There Must Be",
+    "stopSong": "Stop, The Song Will",
+    "reloadSongs": "Songs Anew, Load Them",
+    "refreshDevices": "Devices, Seek Them Again",
+    "startEngine": "Begin, The Engine Will",
+    "fxReset": "Undone, All Effects Become",
+    "fxSavePreset": "Remember This, You Will...",
+    "fxDeletePreset": "Gone, It Is",
+    "setRecordHotkey": "A Key, Choose You Must",
+    "chooseStartupSound": "A Sound, Pick You Shall...",
+    "loadBackground": "A Backdrop, Bring You Will",
+    "clearBackground": "Empty, The Backdrop Becomes",
+    "openRecordingsFolder": "The Recordings, Reveal Them",
+    "reloadAllMods": "Reborn, All Mods Are",
+    "openModsFolder": "The Mods Folder, Open It",
+    "synthPlay": "Play, The Song Will",
+    "synthStop": "Quiet, The Song Becomes",
+    "speak": "Speak, You Will",
+    "stopTts": "Silent, The Voice Becomes"
+  }
+}

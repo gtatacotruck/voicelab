@@ -1,0 +1,33 @@
+{
+  "name": "Shakespearean",
+  "strings": {
+    "boardTab": "The Stage",
+    "fxRackTab": "Sundry Enchantments",
+    "settingsTab": "Thy Decrees",
+    "visualizerTab": "The Looking Glass",
+    "modsTab": "Sundry Contrivances",
+    "synthTab": "The Minstrel",
+    "themeCreatorTab": "Vestments",
+    "ttsTab": "The Oratory",
+    "importButton": "Bring Forth",
+    "stopAllSounds": "Cease, All Ye Sounds",
+    "stopSong": "Cease the Ballad",
+    "reloadSongs": "Summon the Ballads Anew",
+    "refreshDevices": "Survey the Instruments",
+    "startEngine": "Awaken the Engine",
+    "fxReset": "Undo All Enchantments",
+    "fxSavePreset": "Preserve This Arrangement...",
+    "fxDeletePreset": "Banish",
+    "setRecordHotkey": "Appoint a Signal",
+    "chooseStartupSound": "Choose a Fanfare...",
+    "loadBackground": "Hang a Tapestry/GIF",
+    "clearBackground": "Strike the Tapestry",
+    "openRecordingsFolder": "Reveal the Recordings",
+    "reloadAllMods": "Summon All Contrivances Anew",
+    "openModsFolder": "Reveal the Contrivances",
+    "synthPlay": "Play the Ballad",
+    "synthStop": "Silence the Ballad",
+    "speak": "Speak, Prithee",
+    "stopTts": "Silence the Oratory"
+  }
+}

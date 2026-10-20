@@ -1,0 +1,33 @@
+{
+  "name": "Español",
+  "strings": {
+    "boardTab": "Tablero",
+    "fxRackTab": "Efectos",
+    "settingsTab": "Ajustes",
+    "visualizerTab": "Visualizador",
+    "modsTab": "Mods",
+    "synthTab": "Sintetizador",
+    "themeCreatorTab": "Temas",
+    "ttsTab": "Voz",
+    "importButton": "Importar",
+    "stopAllSounds": "Detener Todo",
+    "stopSong": "Detener Canción",
+    "reloadSongs": "Recargar Canciones",
+    "refreshDevices": "Actualizar Dispositivos",
+    "startEngine": "Iniciar Motor",
+    "fxReset": "Restablecer Efectos",
+    "fxSavePreset": "Guardar Preajuste...",
+    "fxDeletePreset": "Eliminar",
+    "setRecordHotkey": "Definir Tecla de Grabar",
+    "chooseStartupSound": "Elegir Sonido de Inicio...",
+    "loadBackground": "Cargar Fondo/GIF",
+    "clearBackground": "Quitar Fondo",
+    "openRecordingsFolder": "Abrir Carpeta de Grabaciones",
+    "reloadAllMods": "Recargar Todos los Mods",
+    "openModsFolder": "Abrir Carpeta de Mods",
+    "synthPlay": "Reproducir Canción",
+    "synthStop": "Detener Canción/Nota",
+    "speak": "Hablar",
+    "stopTts": "Detener Voz"
+  }
+}

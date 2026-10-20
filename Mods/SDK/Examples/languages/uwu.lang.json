@@ -1,0 +1,33 @@
+{
+  "name": "UwU",
+  "strings": {
+    "boardTab": "Bowawd",
+    "fxRackTab": "Efwects",
+    "settingsTab": "Settingz UwU",
+    "visualizerTab": "Pwetty Wightz",
+    "modsTab": "Modz~",
+    "synthTab": "Synfwy",
+    "themeCreatorTab": "Themez",
+    "ttsTab": "Speakies",
+    "importButton": "Bwing It In~",
+    "stopAllSounds": "Shush Evewyone",
+    "stopSong": "Stawpie the Song",
+    "reloadSongs": "Songies Again~",
+    "refreshDevices": "Wefwesh Dewices",
+    "startEngine": "Vwoom Vwoom Stawt",
+    "fxReset": "Undo Aww Effects",
+    "fxSavePreset": "Save Pwesetto...",
+    "fxDeletePreset": "Bye Bye~",
+    "setRecordHotkey": "Pick a Wecowd Buttwon",
+    "chooseStartupSound": "Pick a Boop Sound...",
+    "loadBackground": "Add Cute Backgwound/GIF",
+    "clearBackground": "No Backgwound Pwease",
+    "openRecordingsFolder": "Open Wecowdings~",
+    "reloadAllMods": "Wefwesh Aww da Modz",
+    "openModsFolder": "Open da Modz Fowdew",
+    "synthPlay": "Pway Song~",
+    "synthStop": "Stawpie Song/Note",
+    "speak": "Tawk~",
+    "stopTts": "Shush Voice"
+  }
+}
