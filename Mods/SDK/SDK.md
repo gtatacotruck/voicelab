@@ -547,9 +547,6 @@ for their exact shapes; a mod with no canvas can skip all four.
   - `"list_boards"` -> JSON array of board names.
   - `"switch_board"` with `argJson` = a board name (plain string, not
     JSON-wrapped) -> switches to it, returns `"true"`/`"false"`.
-  - `"get_discord_rpc_enabled"` / `"set_discord_rpc_enabled"` (argJson =
-    `"true"`/`"false"`), read or flip the Rich Presence toggle from
-    Settings.
   - `"list_soundboard_slots"` -> JSON array of `{ "index", "name",
     "hasHotkey" }` for every filled slot on the *current* board. Empty
     slots are skipped, `index` is what `"play_soundboard_slot"` expects.
@@ -724,6 +721,17 @@ entire feature.
   navigation and the most-used action buttons across the Board, FX Rack,
   Settings, Synth, and TTS tabs. Any key vlab doesn't recognise is simply
   ignored, so it's safe to leave stale keys in a mod after an update.
+
+### 6.0 Translating ANY text (v1.9.6)
+
+Besides the fixed keys above, a key can now be the **literal English text**
+vlab shows. `"Master Out Gain (dB)": "Volume maestro (dB)"` renames that FX
+Rack slider; the same works for section titles (`"Glitch FX"`), slider and
+toggle captions, buttons, labels, and drop-down items (`"Reverse Bounce"`).
+For sliders use the caption without the `: value` suffix. Anything you don't
+list stays English. To get every string at once press **Settings -> General ->
+Export Language Template**, which writes `mods/languages/_english_template.json`;
+copy it to `yourlang.lang.json`, edit the right-hand side, Reload All Mods.
 
 ### 6.1 Where it lives
 
