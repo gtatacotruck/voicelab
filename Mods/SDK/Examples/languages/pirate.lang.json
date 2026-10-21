@@ -28,6 +28,12 @@
     "synthPlay": "Sing th' Shanty",
     "synthStop": "Silence th' Crew",
     "speak": "Squawk",
-    "stopTts": "Silence th' Parrot"
+    "stopTts": "Silence th' Parrot",
+    "Master & Gate": "Th' Helm & Gate",
+    "Autotune": "Siren Song",
+    "Glitch FX": "Cursed Waters",
+    "Enable Autotune": "Raise th' Siren",
+    "Master Out Gain (dB)": "Cap'n's Volume (dB)",
+    "Soundboard route:": "Cannon route:"
   }
 }
