@@ -1,6 +1,7 @@
 #pragma once
 #include <juce_gui_extra/juce_gui_extra.h>
 #include "LookAndFeel.h"
+#include "Tr.h"
 #include <functional>
 #include <vector>
 
@@ -13,6 +14,11 @@ namespace vlab::ui
         // denser one-line rows of the new UI in one go (see MainComponent::applyUiMode()).
         static inline bool compactMode = false;
 
+        // v1.9.6: when false (the default) sliders and drop-downs ignore the mouse wheel, so scrolling a page with
+        // the cursor over a control scrolls the page instead of nudging the control. Settings > General has the
+        // toggle; it's applied to every slider/combo at creation time here and to the rest by MainComponent.
+        static inline bool sliderWheelEnabled = false;
+
         FxSection (juce::String titleIn, juce::String glyphText)
             : title (std::move (titleIn)), glyph (std::move (glyphText)) {}
 
@@ -23,11 +29,14 @@ namespace vlab::ui
                                   std::function<void (double)> onChange, int decimalPlaces = 2)
         {
             auto row = std::make_unique<Row>();
-            row->label.setText (formatLabel (labelText, def, decimalPlaces), juce::dontSendNotification);
+            row->baseText = labelText;
+            row->decimals = decimalPlaces;
+            row->label.setText (formatLabel (tr (labelText), def, decimalPlaces), juce::dontSendNotification);
             row->label.setFont (juce::Font (12.5f));
             row->label.setColour (juce::Label::textColourId, palette().text);
             addAndMakeVisible (row->label);
 
+            row->slider.setScrollWheelEnabled (sliderWheelEnabled);
             row->slider.setRange (lo, hi);
             row->slider.setValue (def, juce::dontSendNotification);
             row->slider.setSliderStyle (juce::Slider::LinearHorizontal);
@@ -37,7 +46,7 @@ namespace vlab::ui
             auto* labelPtr = &row->label;
             row->slider.onValueChange = [labelPtr, labelText, decimalPlaces, onChange, sliderPtr = &row->slider]
             {
-                labelPtr->setText (formatLabel (labelText, sliderPtr->getValue(), decimalPlaces), juce::dontSendNotification);
+                labelPtr->setText (formatLabel (tr (labelText), sliderPtr->getValue(), decimalPlaces), juce::dontSendNotification);
                 onChange (sliderPtr->getValue());
             };
 
@@ -52,13 +61,16 @@ namespace vlab::ui
         {
             auto row = std::make_unique<Row>();
             row->isCombo = true;
-            row->label.setText (labelText, juce::dontSendNotification);
+            row->baseText = labelText;
+            row->comboOptions = options;
+            row->label.setText (tr (labelText), juce::dontSendNotification);
             row->label.setFont (juce::Font (12.5f));
             row->label.setColour (juce::Label::textColourId, palette().text);
             addAndMakeVisible (row->label);
 
+            row->combo.setScrollWheelEnabled (sliderWheelEnabled);
             for (int i = 0; i < options.size(); ++i)
-                row->combo.addItem (options[i], i + 1);
+                row->combo.addItem (tr (options[i]), i + 1);
             row->combo.setSelectedItemIndex (defaultIndex, juce::dontSendNotification);
             row->combo.onChange = [onChange, comboPtr = &row->combo] { onChange (comboPtr->getSelectedItemIndex()); };
             addAndMakeVisible (row->combo);
@@ -73,7 +85,8 @@ namespace vlab::ui
         {
             auto row = std::make_unique<Row>();
             row->isToggle = true;
-            row->toggle.setButtonText (labelText);
+            row->baseText = labelText;
+            row->toggle.setButtonText (tr (labelText));
             row->toggle.setToggleState (def, juce::dontSendNotification);
             row->toggle.onClick = [onChange, tp = &row->toggle] { onChange (tp->getToggleState()); };
             addAndMakeVisible (row->toggle);
@@ -88,7 +101,8 @@ namespace vlab::ui
         {
             auto row = std::make_unique<Row>();
             row->isButton = true;
-            row->button.setButtonText (labelText);
+            row->baseText = labelText;
+            row->button.setButtonText (tr (labelText));
             if (tooltip.isNotEmpty()) row->button.setTooltip (tooltip);
             row->button.onClick = onClick;
             addAndMakeVisible (row->button);
@@ -107,6 +121,53 @@ namespace vlab::ui
             addAndMakeVisible (comp);
             rows.push_back (std::move (row));
             resized();
+        }
+
+        // v1.9.6: re-run every piece of text this section owns (title, row labels, toggle/button captions and the
+        // drop-down items) through the active language. The English source text is what language mods key on, so
+        // switching language, or back to English, always starts from the original wording.
+        void retranslate()
+        {
+            for (auto& row : rows)
+            {
+                if (row->isCustom)
+                    continue;
+                if (row->isToggle)       row->toggle.setButtonText (tr (row->baseText));
+                else if (row->isButton)  row->button.setButtonText (tr (row->baseText));
+                else if (row->isCombo)
+                {
+                    row->label.setText (tr (row->baseText), juce::dontSendNotification);
+                    for (int i = 0; i < row->comboOptions.size(); ++i)
+                        row->combo.changeItemText (i + 1, tr (row->comboOptions[i]));
+                    row->combo.repaint();
+                }
+                else
+                    row->label.setText (formatLabel (tr (row->baseText), row->slider.getValue(), row->decimals),
+                                         juce::dontSendNotification);
+            }
+            repaint();
+        }
+
+        // Every English string this section can show, used by Settings > "Export Language Template".
+        void collectTranslatableText (juce::StringArray& out) const
+        {
+            out.addIfNotAlreadyThere (title);
+            for (auto& row : rows)
+            {
+                if (row->isCustom)
+                    continue;
+                out.addIfNotAlreadyThere (row->baseText);
+                for (auto& o : row->comboOptions)
+                    out.addIfNotAlreadyThere (o);
+            }
+        }
+
+        // Custom components can carry their own labels/buttons, so the app-wide translation pass needs to reach them.
+        void forEachCustomComponent (const std::function<void (juce::Component&)>& fn)
+        {
+            for (auto& row : rows)
+                if (row->isCustom && row->customComp != nullptr)
+                    fn (*row->customComp);
         }
 
         void setCollapsible (bool shouldBeCollapsible) { collapsible = shouldBeCollapsible; }
@@ -165,7 +226,7 @@ namespace vlab::ui
             header.removeFromLeft (8.0f);
             g.setColour (p.accent);
             g.setFont (juce::Font (13.0f * u.fontScale, juce::Font::bold));
-            g.drawFittedText (title.toUpperCase(), header.toNearestInt(), juce::Justification::centredLeft, 1);
+            g.drawFittedText (tr (title).toUpperCase(), header.toNearestInt(), juce::Justification::centredLeft, 1);
         }
 
         void resized() override
@@ -250,8 +311,11 @@ namespace vlab::ui
             juce::ToggleButton toggle;
             juce::ComboBox combo;
             juce::TextButton button;
-            juce::Component* customComp = nullptr; // not owned, see addCustomComponent()
+            juce::Component* customComp = nullptr;
             int customHeight = 0;
+            juce::String baseText;            
+            int decimals = 2;              
+            juce::StringArray comboOptions; 
         };
         std::vector<std::unique_ptr<Row>> rows;
 
