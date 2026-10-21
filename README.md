@@ -76,11 +76,13 @@ Community mods live in the [mod shop](https://veelab.vercel.app/store.html). To 
 
 **1.9.5**
 
-- Revamped UI
-- Added Discord RPC back
-- Fixed the pitch shifter
-- Added collapse and expand all buttons
-- Removed herobrine
+-Fixed: the FX rack shrinking when sections were collapsed and expanded (new UI).
+-Fixed: scrolling now works with the cursor on the background.
+-Added: setting to turn the slider and drop-down mouse wheel on or off.
+-Added: language mods can translate any text, plus Export Language Template.
+-Added: Autotune in the FX Rack.
+-Added: soundboard routes (Route 1, Route 2, custom) on the Board tab.
+-Removed: the jellyfish overlay.
 
 The full changelog is on the [website](https://veelab.vercel.app/#changelog).
 
