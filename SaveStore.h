@@ -96,8 +96,8 @@ namespace vlab
                 { "theme", 0 }, { "uiPreset", 0 }, { "language", 0 }, { "background", 0 },
                 { "splashStyle", 0 }, { "device", 0 },
                 { "rgb", 0 }, { "startupSound", 0 },
-                { "recordHotkey", 1 }, { "experimental", 1 }, { "discordRpc", 1 }, { "performance", 1 },
-                { "soundboardConfig", 2 }, { "deletedRecordings", 2 },
+                { "recordHotkey", 1 }, { "experimental", 1 }, { "performance", 1 }, { "sliderWheel", 1 },
+                { "soundboardConfig", 2 }, { "deletedRecordings", 2 }, { "soundboardRoutes", 2 },
                 { "fxPresets", 3 }, { "arpSongs", 3 },
             };
             for (auto& e : table)
