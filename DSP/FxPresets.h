@@ -42,7 +42,8 @@ namespace vlab
         X(autoPanRate) X(autoPanDepth) \
         X(telephoneMix) \
         X(doublerDetuneCents) X(doublerDelayMs) X(doublerMix) \
-        X(browserAudioVol)
+        X(browserAudioVol) \
+        X(autotuneRetuneMs) X(autotuneAmount) X(autotuneRefHz)
 
     #define VLAB_FX_BOOL_FIELDS(X) \
         X(loudMicBypass) X(headSpaceEnabled) \
@@ -51,10 +52,11 @@ namespace vlab
         X(stutterEnabled) \
         X(escRepeatEnabled) X(accRepeatEnabled) X(decRepeatEnabled) X(pitchDownRepeatEnabled) X(scatterEnabled) \
         X(reverseBurstEnabled) X(glitchGateEnabled) X(freezeEnabled) X(vinylStopEnabled) \
-        X(brokenDelayEnabled) X(pitchJumpEnabled) X(backmaskEnabled) X(microFreezeEnabled) X(bufferShuffleEnabled)
+        X(brokenDelayEnabled) X(pitchJumpEnabled) X(backmaskEnabled) X(microFreezeEnabled) X(bufferShuffleEnabled) \
+        X(autotuneEnabled)
 
     #define VLAB_FX_INT_FIELDS(X) \
-        X(stutterType) X(bufferShuffleChunks)
+        X(stutterType) X(bufferShuffleChunks) X(autotuneKey) X(autotuneScale)
 
     inline juce::var fxParamsToVar (const AudioEngineParams& p)
     {
