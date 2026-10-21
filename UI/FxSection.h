@@ -14,9 +14,7 @@ namespace vlab::ui
         // denser one-line rows of the new UI in one go (see MainComponent::applyUiMode()).
         static inline bool compactMode = false;
 
-        // v1.9.6: when false (the default) sliders and drop-downs ignore the mouse wheel, so scrolling a page with
-        // the cursor over a control scrolls the page instead of nudging the control. Settings > General has the
-        // toggle; it's applied to every slider/combo at creation time here and to the rest by MainComponent.
+
         static inline bool sliderWheelEnabled = false;
 
         FxSection (juce::String titleIn, juce::String glyphText)
@@ -123,9 +121,7 @@ namespace vlab::ui
             resized();
         }
 
-        // v1.9.6: re-run every piece of text this section owns (title, row labels, toggle/button captions and the
-        // drop-down items) through the active language. The English source text is what language mods key on, so
-        // switching language, or back to English, always starts from the original wording.
+
         void retranslate()
         {
             for (auto& row : rows)
@@ -311,11 +307,11 @@ namespace vlab::ui
             juce::ToggleButton toggle;
             juce::ComboBox combo;
             juce::TextButton button;
-            juce::Component* customComp = nullptr;
+            juce::Component* customComp = nullptr; 
             int customHeight = 0;
-            juce::String baseText;            
+            juce::String baseText;         
             int decimals = 2;              
-            juce::StringArray comboOptions; 
+            juce::StringArray comboOptions;   
         };
         std::vector<std::unique_ptr<Row>> rows;
 
