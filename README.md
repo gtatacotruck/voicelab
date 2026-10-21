@@ -4,14 +4,14 @@
 
 **A free, open source voice changer and soundboard for Windows.**
 
-Live voice effects, a hotkey soundboard, text to speech, a MIDI synth and a fully themeable UI, with a mod SDK if you want to build on top of it.
+Live voice effects, autotune, a hotkey soundboard with routing, text to speech, a MIDI synth and a fully themeable UI, with a mod SDK if you want to build on top of it.
 
 ![Platform](https://img.shields.io/badge/platform-Windows-0b0b0b?style=flat-square&labelColor=241032)
-![Version](https://img.shields.io/badge/version-1.9.5-00cc00?style=flat-square&labelColor=241032)
+![Version](https://img.shields.io/badge/version-1.9.6-00cc00?style=flat-square&labelColor=241032)
 ![License](https://img.shields.io/badge/license-MIT-ff8c1a?style=flat-square&labelColor=241032)
 ![Built with](https://img.shields.io/badge/built%20with-C%2B%2B%20%2F%20JUCE-5b2a86?style=flat-square&labelColor=241032)
 
-[Website](https://veelab.vercel.app) &nbsp;|&nbsp; [Download](https://file.garden/aoIOyWCDZ1SJNkG_/Vlab1.9.5.zip) &nbsp;|&nbsp; [Telegram](https://t.me/vlabsoundboard) &nbsp;|&nbsp; [Mod shop](https://veelab.vercel.app/store.html)
+[Website](https://veelab.vercel.app) &nbsp;|&nbsp; [Download](https://file.garden/aoIOyWCDZ1SJNkG_/Vlab1.9.6.zip) &nbsp;|&nbsp; [Telegram](https://t.me/vlabsoundboard) &nbsp;|&nbsp; [Mod shop](https://veelab.vercel.app/store.html)
 
 </div>
 
@@ -50,39 +50,44 @@ VLAB is **Windows only**. There are no plans for a Linux version.
 | | |
 |---|---|
 | **FX chain** | Pitch shifter, EQ, compressor, noise gate, distortion, bitcrush, tremolo, stutter, ring mod, chorus, phaser, flanger, auto wah, delay, reverb, pan and headspace, and a limiter so nobody gets their ears blown out. All of it runs live on your actual voice. |
+| **Autotune** | Pick a key and scale, then set how fast it snaps. Retune speed 0 gives the hard, stepped autotune sound, higher values keep your natural vibrato. A live readout shows the note you are singing and the note it lands on. |
 | **Soundboard** | Bind a hotkey to each slot, double tap to unbind, record straight into a slot, and keep multiple soundboards you can switch between. |
+| **Soundboard routes** | Route 1 plays the soundboard after your voice effects, so they don't touch it. Route 2 sends it through your voice effects. You can also make custom routes that join the chain at any point. |
 | **Text to speech** | Has its own tab. Pick a voice, adjust speed, volume and pitch, and watch the words highlight as it reads. |
 | **MIDI and synth** | On screen piano with macros, plus an arpeggiator that handles chords. |
 | **System echo** | Listen back to what other apps on your PC are playing, right from VLAB. |
-| **Visualizers** | Waveform, spectrum analyzer, radial spectrum, VU meter, goniometer, a virtual head widget, and a jellyfish overlay that just floats around. |
+| **Visualizers** | Waveform, spectrum analyzer, radial spectrum, VU meter, goniometer and a virtual head widget. |
 | **Themeable UI** | Glass toggle, RGB cycling (rainbow, pulse, strobe, chase), a theme creator, and UI presets that save and load your whole layout. |
-| **Multi language** | The UI is not stuck in English. |
+| **Multi language** | The UI is not stuck in English. Language mods can translate any text in the app, and there is a built in button to export a template with every string. |
+| **Scroll settings** | The mouse wheel can scroll the page everywhere, including over the background. A setting controls whether it also moves sliders and drop-downs. |
 | **Discord RPC** | Show what you are up to in Discord. |
-| **Mod SDK** | Write your own DLL audio mods, JSON theme mods, or app mods that add visual addons on top of audio mods. |
+| **Mod SDK** | Write your own DLL audio mods, JSON theme mods, language mods, or app mods that add visual addons on top of audio mods. |
 
 There is also a small pong minigame hidden in there if you poke around enough.
 
 ## Mods
 
-VLAB has three kinds of mods:
+VLAB has four kinds of mods:
 
 - **Audio mods**: DLLs that plug into the audio chain.
 - **Theme mods**: JSON files that change how the UI looks.
+- **Language mods**: JSON files that translate the UI. Use **Settings > General > Export Language Template** to get a file listing every string.
 - **App mods**: visual addons that sit on top of audio mods.
 
 Community mods live in the [mod shop](https://veelab.vercel.app/store.html). To make your own, download VLAB or read the code here on GitHub, and the SDK documentation is included.
 
 ## Changelog
 
-**1.9.5**
+**1.9.6**
 
--Fixed: the FX rack shrinking when sections were collapsed and expanded (new UI).
--Fixed: scrolling now works with the cursor on the background.
--Added: setting to turn the slider and drop-down mouse wheel on or off.
--Added: language mods can translate any text, plus Export Language Template.
--Added: Autotune in the FX Rack.
--Added: soundboard routes (Route 1, Route 2, custom) on the Board tab.
--Removed: the jellyfish overlay.
+- Fixed: the FX rack shrinking when sections were collapsed and expanded (new UI).
+- Fixed: scrolling now works with the cursor on the background.
+- Fixed: the soundboard's send reverb no longer shares state with the master reverb.
+- Added: setting to turn the slider and drop-down mouse wheel on or off (off by default).
+- Added: language mods can translate any text, plus Export Language Template.
+- Added: Autotune in the FX Rack.
+- Added: soundboard routes (Route 1, Route 2, custom) on the Board tab.
+- Removed: the jellyfish overlay and its Ctrl+Shift+J shortcut.
 
 The full changelog is on the [website](https://veelab.vercel.app/#changelog).
 
