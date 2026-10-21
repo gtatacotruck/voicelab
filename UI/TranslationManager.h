@@ -116,6 +116,19 @@ namespace vlab::ui
 
         juce::String getLastAppliedLanguageName() const { return lastAppliedName; }
 
+        // looks up the literal English text as a key; unlisted text is returned unchanged
+        juce::String text (const juce::String& english) const
+        {
+            if (active.empty() || english.isEmpty())
+                return english;
+            auto it = active.find (english.toStdString());
+            if (it != active.end() && it->second.isNotEmpty())
+                return it->second;
+            return english;
+        }
+
+        const std::map<std::string, juce::String>& getDefaultKeyStrings() const { return defaults; }
+
         // Get translated text, fallback to English then key itself
         juce::String t (const juce::String& key) const
         {
