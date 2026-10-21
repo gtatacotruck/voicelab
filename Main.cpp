@@ -19,7 +19,6 @@
 #include "UI/LookAndFeel.h"
 #include "UI/SoundSlotCard.h"
 #include "UI/MonitorOutput.h"
-#include "Discord/DiscordRichPresence.h"
 #include "UI/FxSection.h"
 #include "UI/SplashScreen.h"
 #include "UI/WaveformDisplay.h"
@@ -45,10 +44,11 @@
 #include "Mods/VisualizerModHost.h"
 #include "Mods/AppModHost.h"
 #include "UI/TranslationManager.h"
+#include "UI/Tr.h"
+#include "SoundboardRoutes.h"
 #include "Update/UpdateChecker.h"
 
-static constexpr const char* kAppVersionString = "1.9.5";
-#include "UI/JellyfishOverlay.h"
+static constexpr const char* kAppVersionString = "1.9.6";
 #include "UI/ModderView.h"
 
 using namespace vlab::ui;
@@ -143,16 +143,6 @@ public:
                 for (int i = 0; i < soundboard.getBoardCount(); ++i)
                     if (juce::String (soundboard.getBoardName (i)) == argJson) { switchBoard (i); return "true"; }
                 return "false";
-            }
-            if (name == "get_discord_rpc_enabled")
-                return discordRpcEnabled ? "true" : "false";
-            if (name == "set_discord_rpc_enabled")
-            {
-                const bool v = argJson.trim().equalsIgnoreCase ("true");
-                discordRpcEnabled = v;
-                discordRPC.setEnabled (v);
-                saveDiscordRpcPreference();
-                return "true";
             }
             if (name == "list_soundboard_slots")
             {
@@ -284,9 +274,6 @@ public:
                 splashStyleIndex = juce::jlimit (0, 9, (int) parsed.getProperty ("style", 0));
         }
 
-        discordRpcPrefFile = saveStore.stagingFileFor ("discordRpc");
-        loadDiscordRpcPreference();
-
         modernUiPrefFile = saveStore.stagingFileFor ("modernUi");
         if (modernUiPrefFile.existsAsFile())
         {
@@ -305,6 +292,22 @@ public:
             const auto savedLanguage = translationManager.loadPreference (languagePrefFile);
             translationManager.applyLanguage (savedLanguage.isNotEmpty() ? savedLanguage : "English");
         }
+        // v1.9.6: from here on ANY text built through vlab::ui::tr() (FX rack rows, section titles, ...) is looked up in the
+        // active language mod by its literal English wording. Installed before the tabs are built so they come out translated.
+        vlab::ui::translateHook() = [this] (const juce::String& english) { return translationManager.text (english); };
+
+        sliderWheelPrefFile = saveStore.stagingFileFor ("sliderWheel");
+        if (sliderWheelPrefFile.existsAsFile())
+        {
+            auto parsed = juce::JSON::parse (sliderWheelPrefFile);
+            if (parsed.isObject())
+                FxSection::sliderWheelEnabled = (bool) parsed.getProperty ("enabled", false);
+        }
+
+        sbRoutesPrefFile = saveStore.stagingFileFor ("soundboardRoutes");
+        if (sbRoutesPrefFile.existsAsFile())
+            sbRoutes.fromVar (juce::JSON::parse (sbRoutesPrefFile));
+        engine.sbInjectPoint = sbRoutes.getSelectedRoute().injectPoint;
 
         addAndMakeVisible (backgroundLayer);
         backgroundLayer.setOpacity (0.5f);
@@ -361,6 +364,7 @@ public:
         buildTtsTab();
 
         applyTranslations(); // every translatable button now exists; push the saved/default language onto them
+        applyScrollWheelPolicy (*this);
 
         engine.browserAudioMix = [this] (vlab::AudioBuffer& out, int n) { systemAudioCapture.pull (out, n); };
 
@@ -401,15 +405,11 @@ public:
         startTimerHz (20);
         grabKeyboardFocus(); // so hotkeys work right away, before the user clicks anything
 
-        discordRPC.setEnabled (discordRpcEnabled);
-        discordRPC.start();
-
-        addAndMakeVisible (jellyfishOverlay);
-        jellyfishOverlay.toFront (false);
     }
 
     ~MainComponent() override
     {
+        vlab::ui::translateHook() = {};
         shutdownAudio();
         monitorOut.close();
         juce::LookAndFeel::setDefaultLookAndFeel (nullptr);
@@ -461,7 +461,7 @@ public:
         if (desc.isEmpty())
             return false;
 
-        // ── easter egg: spam Ctrl+P to open the DOCTOS video (i removed this bs lol)─────────────
+        // ── easter egg: spam Ctrl+P to open the DOCTOS video ─────────────
         if (key.getModifiers().isCtrlDown() && key.getKeyCode() == (int) 'P')
         {
             const auto now = juce::Time::getMillisecondCounter();
@@ -474,12 +474,6 @@ public:
                 ctrlPComboCount = 0;
                 juce::URL ("https://www.youtube.com/watch?v=i7YfT-ILKAg").launchInDefaultBrowser();
             }
-            return true;
-        }
-
-        if (key.getModifiers().isCtrlDown() && key.getModifiers().isShiftDown() && key.getKeyCode() == (int) 'J')
-        {
-            jellyfishOverlay.spawnOne();
             return true;
         }
 
@@ -604,7 +598,7 @@ public:
             {
                 target = -1;
                 for (int i = 0; i < (int) soundboard.getSlots().size(); ++i)
-                    if (soundboard.getSlots()[(size_t) i].path.empty() && soundboard.getSlots()[(size_t) i].data == nullptr) { target = i; break; }
+                    if (soundboard.getSlots()[(size_t) i].data == nullptr) { target = i; break; }
                 if (target < 0)
                 {
                     recorderStatusLabel.setText ("No empty slot available, pick a target slot first.", juce::dontSendNotification);
@@ -788,7 +782,6 @@ public:
     void applyPerformanceReducedEffects (bool on)
     {
         refreshRgbTargetHz();
-        jellyfishOverlay.setVisible (! on);
         backgroundLayer.setVisible (! on);
     }
 
@@ -895,6 +888,17 @@ public:
 
     void releaseResources() override {}
 
+    // v1.9.6: scrolling with the cursor on the window background (the margins, the gaps between panels, the sidebar's
+    // empty space, the background image) used to do nothing, because only the viewports themselves handled the wheel.
+    // Anything that doesn't use the wheel itself ends up here and is handed to whichever tab is showing.
+    void mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel) override
+    {
+        if (auto* vp = getActiveViewport())
+            vp->mouseWheelMove (e.getEventRelativeTo (vp), wheel);
+        else
+            juce::AudioAppComponent::mouseWheelMove (e, wheel);
+    }
+
     // ── layout ────────────────────────────────────────────────────────────
     void paint (juce::Graphics& g) override
     {
@@ -968,6 +972,19 @@ public:
             boardReverseToggle.setBounds (row.removeFromLeft (80));
             boardArea.removeFromTop (10);
         }
+        {
+            auto row = boardArea.removeFromTop (28);
+            boardRouteLabel.setBounds (row.removeFromLeft (juce::jmin (140, row.getWidth() / 5)));
+            row.removeFromLeft (8);
+            boardRouteBox.setBounds (row.removeFromLeft (juce::jlimit (150, 260, row.getWidth() / 3)));
+            row.removeFromLeft (8);
+            boardDeleteRouteButton.setBounds (row.removeFromRight (70));
+            row.removeFromRight (6);
+            boardNewRouteButton.setBounds (row.removeFromRight (104));
+            row.removeFromRight (10);
+            boardRouteInfoLabel.setBounds (row);
+            boardArea.removeFromTop (10);
+        }
         boardViewport.setBounds (boardArea);
         fxRackViewport.setBounds (main);
         settingsViewport.setBounds (main);
@@ -987,7 +1004,6 @@ public:
         layoutThemeCreatorContent (themeCreatorViewport.getWidth());
         layoutTtsContent (ttsViewport.getWidth());
 
-        jellyfishOverlay.setBounds (getLocalBounds());
         if (modderView != nullptr) modderView->setBounds (getLocalBounds());
     }
 
@@ -1188,14 +1204,7 @@ public:
 private:
     vlab::UpdateChecker updateChecker;
     std::unique_ptr<vlab::ui::ModderView> modderView;
-    vlab::ui::JellyfishOverlay jellyfishOverlay;
     vlab::ui::BackgroundLayer backgroundLayer;
-    vlab::DiscordRichPresence discordRPC { "1532597752410935397" };
-    bool discordRpcEnabled = true;
-    juce::File discordRpcPrefFile;
-    juce::uint32 lastDiscordBoardRefreshMs = 0;
-    int discordNowPlayingSlot = -1;
-    juce::String lastGenericDiscordText;
     bool modernUi = true;
     juce::File modernUiPrefFile;
     int getSidebarWidth() const { return modernUi ? 264 : 300; }
@@ -1273,6 +1282,15 @@ private:
     juce::Label boardVolumeLabel { {}, "Volume" }, boardSpeedLabel { {}, "Speed" };
     juce::Slider boardVolumeSlider, boardSpeedSlider;
     juce::ToggleButton boardLoopToggle { "Loop" }, boardReverseToggle { "Reverse" };
+
+    // v1.9.6: soundboard routing, see SoundboardRoutes.h
+    vlab::SoundboardRoutes sbRoutes;
+    juce::File sbRoutesPrefFile, sliderWheelPrefFile;
+    juce::Label boardRouteLabel { {}, "Soundboard route:" }, boardRouteInfoLabel;
+    juce::ComboBox boardRouteBox;
+    juce::TextButton boardNewRouteButton { "New Route..." }, boardDeleteRouteButton { "Delete" };
+    int translateTick = 0;
+    juce::Label autotuneReadout;
     juce::TextButton importButton { "Import" };
     juce::TextButton fxRackTabButton { "FX Rack" }, boardTabButton { "Board" };
     juce::TextButton settingsTabButton { "Settings" }, visualizerTabButton { "Visualizer" };
@@ -1281,7 +1299,6 @@ private:
     juce::TextButton ttsTabButton { "TTS" };
     enum class Tab { Board, FxRack, Settings, Visualizer, Mods, Synth, ThemeCreator, Tts };
     Tab currentTab = Tab::Board;
-    Tab lastGenericDiscordTab = Tab::Board;
 
     class ReloadOverlay : public juce::Component
     {
@@ -1419,25 +1436,20 @@ private:
         vuBar.l = engine.vuPeakL; vuBar.r = engine.vuPeakR; vuBar.repaint();
         cpuLabel.setText ("CPU " + juce::String ((int) engine.cpuPercent.load()) + "%", juce::dontSendNotification);
 
+        updateAutotuneReadout();
+        if (++translateTick >= 40) // ~every 2 s: catch text the app rewrote since the last language pass (e.g. "Stop Engine")
+        {
+            translateTick = 0;
+            if (translationManager.getLastAppliedLanguageName() != "English")
+                retranslateTree (*this);
+        }
+
         appModHost.tick(); // let any loaded App Mods poll/update their own state
         for (auto& c : appModEmbeddedCanvases) if (c->isVisible()) c->refreshFrame();
         for (auto& t : appModFullViewTabs) if (t->canvas->isVisible()) t->canvas->refreshFrame();
 
         for (auto& c : cards)
             if (c) c->pollProgress();
-
-        if (const int skipped = soundboard.takeSkippedForMemoryCount())
-            showToast (juce::String (skipped) + " sounds were not preloaded (memory limit). They load when you play them.");
-
-        if (currentTab == Tab::Board || currentTab == Tab::Tts)
-        {
-            const auto now = juce::Time::getMillisecondCounter();
-            if (now - lastDiscordBoardRefreshMs >= 750)
-            {
-                lastDiscordBoardRefreshMs = now;
-                refreshDiscordPresence();
-            }
-        }
 
         if (soundboard.isRecording.load())
         {
@@ -1537,17 +1549,16 @@ private:
         presetBox.addItem ("Chipmunk", 4);
         presetBox.addItem ("Radio", 5);
         presetBox.setSelectedItemIndex (0, juce::dontSendNotification);
-        presetBox.onChange = [this] { applyPreset (presetBox.getText()); refreshDiscordPresence(); };
+        presetBox.onChange = [this] { applyPreset (presetBox.getText()); };
 
         for (auto& n : buildSongNameList())
             songBox.addItem (n, songBox.getNumItems() + 1);
         songBox.onChange = [this]
         {
             if (sequencer) sequencer->playSong (songBox.getText().toStdString());
-            refreshDiscordPresence();
         };
         stopSongButton.getProperties().set ("danger", true);
-        stopSongButton.onClick = [this] { if (sequencer) sequencer->stop(); refreshDiscordPresence(); };
+        stopSongButton.onClick = [this] { if (sequencer) sequencer->stop(); };
 
         refreshDeviceLists();
     }
@@ -1754,6 +1765,28 @@ private:
         boardReverseToggle.setToggleState (sbDefaultReverse, juce::dontSendNotification);
         boardReverseToggle.onClick = [this] { sbDefaultReverse = boardReverseToggle.getToggleState(); };
 
+        addAndMakeVisible (boardRouteLabel);
+        boardRouteLabel.setFont (juce::Font (12.0f));
+        boardRouteLabel.setColour (juce::Label::textColourId, palette().textDim);
+        addAndMakeVisible (boardRouteInfoLabel);
+        boardRouteInfoLabel.setFont (juce::Font (11.0f));
+        boardRouteInfoLabel.setColour (juce::Label::textColourId, palette().textDim);
+        addAndMakeVisible (boardRouteBox);
+        addAndMakeVisible (boardNewRouteButton);
+        addAndMakeVisible (boardDeleteRouteButton);
+        boardDeleteRouteButton.getProperties().set ("danger", true);
+        refreshRouteControls();
+        boardRouteBox.onChange = [this]
+        {
+            const int idx = boardRouteBox.getSelectedItemIndex();
+            if (idx < 0 || idx >= sbRoutes.size())
+                return;
+            sbRoutes.setSelected (idx);
+            applySelectedRoute();
+        };
+        boardNewRouteButton.onClick = [this] { promptNewRoute(); };
+        boardDeleteRouteButton.onClick = [this] { deleteSelectedRoute(); };
+
         addAndMakeVisible (boardSelectorBar);
         boardSelectorBar.onSelect = [this] (int idx) { switchBoard (idx); };
         boardSelectorBar.onAdd    = [this] { promptAddBoard(); };
@@ -1834,6 +1867,85 @@ private:
             boardContent.addAndMakeVisible (*card);
             cards[(size_t) i] = std::move (card);
         }
+    }
+
+    // ── Soundboard routes (vlab_soundboard.json -> "soundboardRoutes") ─────────
+    void saveSoundboardRoutes()
+    {
+        sbRoutesPrefFile.replaceWithText (juce::JSON::toString (sbRoutes.toVar()));
+        saveStore.commit ("soundboardRoutes");
+    }
+
+    void refreshRouteControls()
+    {
+        boardRouteBox.clear (juce::dontSendNotification);
+        for (int i = 0; i < sbRoutes.size(); ++i)
+            boardRouteBox.addItem (vlab::ui::tr (sbRoutes.get (i).name), i + 1);
+        boardRouteBox.setSelectedItemIndex (sbRoutes.getSelected(), juce::dontSendNotification);
+
+        const auto& r = sbRoutes.getSelectedRoute();
+        boardRouteInfoLabel.setText (vlab::ui::tr (juce::String (vlab::soundboardInjectPointName (r.injectPoint))),
+                                      juce::dontSendNotification);
+        boardDeleteRouteButton.setEnabled (! r.builtIn);
+    }
+
+    void applySelectedRoute()
+    {
+        engine.sbInjectPoint = sbRoutes.getSelectedRoute().injectPoint;
+        refreshRouteControls();
+        saveSoundboardRoutes();
+    }
+
+    void promptNewRoute()
+    {
+        auto* aw = new juce::AlertWindow ("New Soundboard Route",
+            "Name it, then pick where in the voice chain the soundboard joins. Everything after that point also affects the soundboard.",
+            juce::AlertWindow::NoIcon);
+        aw->addTextEditor ("name", "My Route");
+        juce::StringArray points;
+        for (int i = 0; i < (int) vlab::kSbNumPoints; ++i)
+            points.add (vlab::soundboardInjectPointName (i));
+        aw->addComboBox ("point", points, "Joins the chain");
+        if (auto* cb = aw->getComboBoxComponent ("point"))
+            cb->setSelectedItemIndex ((int) vlab::kSbAfterEqComp, juce::dontSendNotification);
+        aw->addButton ("Create", 1, juce::KeyPress (juce::KeyPress::returnKey));
+        aw->addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+        aw->enterModalState (true, juce::ModalCallbackFunction::create ([this, aw] (int result)
+        {
+            std::unique_ptr<juce::AlertWindow> owner (aw);
+            if (result != 1)
+                return;
+            const auto name = aw->getTextEditorContents ("name");
+            const int point = aw->getComboBoxComponent ("point") != nullptr
+                                ? aw->getComboBoxComponent ("point")->getSelectedItemIndex() : (int) vlab::kSbAfterEqComp;
+            const int idx = sbRoutes.add (name, point);
+            if (idx < 0)
+            {
+                juce::AlertWindow::showMessageBoxAsync (juce::AlertWindow::WarningIcon, "vlab",
+                    "That name is empty or already used by another route, pick a different one.");
+                return;
+            }
+            sbRoutes.setSelected (idx);
+            applySelectedRoute();
+        }), false);
+    }
+
+    void deleteSelectedRoute()
+    {
+        const int idx = sbRoutes.getSelected();
+        if (sbRoutes.get (idx).builtIn)
+            return;
+        const auto name = sbRoutes.get (idx).name;
+        juce::AlertWindow::showOkCancelBox (juce::AlertWindow::QuestionIcon, "Delete route",
+            "Delete the route \"" + name + "\"? The soundboard goes back to Route 1.", "Delete", "Cancel", this,
+            juce::ModalCallbackFunction::create ([this, name] (int result)
+            {
+                if (result != 1)
+                    return;
+                const int i = sbRoutes.indexOfName (name);
+                if (i >= 0 && sbRoutes.remove (i))
+                    applySelectedRoute();
+            }));
     }
 
     void refreshCardsFromActiveBoard()
@@ -2033,7 +2145,7 @@ private:
         {
             auto s = std::make_unique<FxSection> (title, glyph);
             s->setCollapsible (true);
-            s->onCollapsedChanged = [this] { layoutFxRackContent (fxRackContent.getWidth() > 0 ? fxRackContent.getWidth() : getWidth() - getSidebarWidth() - 36); };
+            s->onCollapsedChanged = [this] { relayoutFxRack(); };
             fxRackContent.addAndMakeVisible (*s);
             fxSections.push_back (std::move (s));
             return *fxSections.back();
@@ -2059,6 +2171,24 @@ private:
         auto& pitchSlider = transform.addSlider ("Pitch (semitones)", -12.0, 12.0, 0.0, [&p] (double v) { p.pitch = (float) v; }, 1);
         auto& distSlider = transform.addSlider ("Distortion", 0.0, 1.0, 0.0, [&p] (double v) { p.distortion = (float) v; });
         auto& bitcrushSlider = transform.addSlider ("Bitcrush (bits)", 0.0, 16.0, 0.0, [&p] (double v) { p.bitcrush = (float) v; }, 0);
+
+        auto& autotune = addSection ("Autotune", "A");
+        auto& atEnableToggle = autotune.addToggle ("Enable Autotune", false, [&p, this] (bool v) { p.autotuneEnabled = v; });
+        auto& atKeyCombo = autotune.addCombo ("Key", { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" }, 0,
+            [&p] (int idx) { p.autotuneKey = idx; });
+        juce::StringArray scaleNames;
+        for (int i = 0; i < (int) vlab::dsp::AutoTune::NumScales; ++i)
+            scaleNames.add (vlab::dsp::AutoTune::scaleName (i));
+        auto& atScaleCombo = autotune.addCombo ("Scale", scaleNames, 0, [&p] (int idx) { p.autotuneScale = idx; });
+        auto& atRetuneSlider = autotune.addSlider ("Retune Speed (ms, 0 = hard tune)", 0.0, 400.0, 20.0,
+            [&p] (double v) { p.autotuneRetuneMs = (float) v; }, 0);
+        auto& atAmountSlider = autotune.addSlider ("Correction Amount", 0.0, 1.0, 1.0, [&p] (double v) { p.autotuneAmount = (float) v; });
+        auto& atRefSlider = autotune.addSlider ("Tuning Reference A4 (Hz)", 415.0, 466.0, 440.0,
+            [&p] (double v) { p.autotuneRefHz = (float) v; }, 1);
+        autotuneReadout.setFont (juce::Font (12.0f));
+        autotuneReadout.setColour (juce::Label::textColourId, palette().textDim);
+        autotuneReadout.setText (vlab::ui::tr ("Autotune is off"), juce::dontSendNotification);
+        autotune.addCustomComponent (autotuneReadout, 24);
 
         auto& mod = addSection ("Modulation", "M");
         auto& chorusMixSlider = mod.addSlider ("Chorus Mix", 0.0, 1.0, 0.0, [&p] (double v) { p.chorusMix = (float) v; });
@@ -2199,6 +2329,12 @@ private:
         // Sync sliders when params change programmatically
         refreshFxSlidersFromParams = [&, this]
         {
+            atEnableToggle.setToggleState (p.autotuneEnabled.load(), juce::dontSendNotification);
+            atKeyCombo.setSelectedItemIndex (p.autotuneKey.load(), juce::dontSendNotification);
+            atScaleCombo.setSelectedItemIndex (p.autotuneScale.load(), juce::dontSendNotification);
+            atRetuneSlider.setValue (p.autotuneRetuneMs, juce::sendNotificationSync);
+            atAmountSlider.setValue (p.autotuneAmount, juce::sendNotificationSync);
+            atRefSlider.setValue (p.autotuneRefHz, juce::sendNotificationSync);
             masterOutSlider.setValue (p.masterOutGain, juce::sendNotificationSync);
             micGainSlider.setValue (p.gain, juce::sendNotificationSync);
             gateSlider.setValue (p.noiseGate, juce::sendNotificationSync);
@@ -2385,6 +2521,13 @@ private:
                 toggleModderView(); // closes it, same "advanced-only tool goes away with the setting" rule as above
         });
 
+        general.addToggle ("Mouse wheel adjusts sliders and drop-downs (off = wheel always scrolls the page)", FxSection::sliderWheelEnabled, [this] (bool v)
+        {
+            FxSection::sliderWheelEnabled = v;
+            applyScrollWheelPolicy (*this);
+            saveSliderWheelPreference();
+        });
+
         general.addToggle ("Play Startup Sound", startupSoundEnabled, [this] (bool v)
         {
             startupSoundEnabled = v;
@@ -2435,7 +2578,6 @@ private:
                 themeManager.savePreference (themePrefFile);
                 saveStore.commit ("theme");
                 rgbEngine.refreshBase();
-                refreshDiscordPresence();
                 repaint();
                 for (auto* c : { (juce::Component*) &boardContent, &fxRackContent, &settingsContent,
                                   &visualizerContent, &synthContent, &modsContent, &themeCreatorContent })
@@ -2481,6 +2623,9 @@ private:
                 applyTranslations();
             }
         });
+
+        general.addButton ("Export Language Template", "Writes every piece of text vlab shows to mods/languages/_english_template.json so you can make a complete language mod",
+            [this] { exportLanguageTemplate(); });
 
         settingsContent.addAndMakeVisible (sbFolderLabel);
         sbFolderLabel.setFont (juce::Font (11.0f));
@@ -2638,10 +2783,6 @@ private:
         performanceStatusLabel.setText ("Lower buffer sizes reduce latency but use more CPU; smaller is not always better.",
             juce::dontSendNotification);
 
-
-        auto& discord = addSection ("Discord Rich Presence", "D");
-        discord.addToggle ("Show \"Using vlab\" on Discord", discordRpcEnabled,
-            [this] (bool v) { discordRpcEnabled = v; discordRPC.setEnabled (v); saveDiscordRpcPreference(); });
     }
 
     // ── build: Visualizer tab (Advanced Mode) ───────────────────────────
@@ -2654,7 +2795,7 @@ private:
 
         visualizerContent.addAndMakeVisible (vizChangerCombo);
         refreshVizChangerCombo();
-        vizChangerCombo.onChange = [this] { applyVizChangerSelection(); refreshDiscordPresence(); };
+        vizChangerCombo.onChange = [this] { applyVizChangerSelection(); };
 
         visualizerContent.addAndMakeVisible (waveformDisplay);
         visualizerContent.addAndMakeVisible (visualizerHeadWidget);
@@ -2803,7 +2944,6 @@ private:
         synthContent.removeAllChildren();
         buildSynthTab();
         layoutSynthContent (synthViewport.getWidth());
-        refreshDiscordPresence();
     }
 
     // ── build: Synth tab ─────────────────────────────────────────────────
@@ -2884,7 +3024,6 @@ private:
                 synth.songSteps.clear();
                 synth.noteOff();
             }
-            refreshDiscordPresence();
         });
         arp.addSlider ("Arp BPM", 40.0, 300.0, 120.0, [&sp] (double v) { sp.arpBpm = (float) v; }, 0);
         arp.addCombo ("Arp Pattern", { "Up", "Down", "Up / Down", "Random" }, 0, [this, &sp] (int idx)
@@ -2910,7 +3049,6 @@ private:
             if (idx < 0 || idx >= names.size() || ! sequencer) return;
             heldArpNotes.clear(); // a named song and the piano arpeggiator both drive songSteps, don't let them fight
             sequencer->playSong (names[idx].toStdString());
-            refreshDiscordPresence();
         });
 
         synthContent.addAndMakeVisible (reloadSongsButton);
@@ -2947,7 +3085,6 @@ private:
             if (sequencer) sequencer->stop();
             synth.allNotesOff();
             holdToneToggle.setToggleState (false, juce::dontSendNotification);
-            refreshDiscordPresence();
         };
         synthResetButton.onClick = [this] { resetSynthPatch(); };
 
@@ -3236,6 +3373,11 @@ private:
         boardSpeedSlider.setVisible (false);
         boardLoopToggle.setVisible (false);
         boardReverseToggle.setVisible (false);
+        boardRouteLabel.setVisible (false);
+        boardRouteInfoLabel.setVisible (false);
+        boardRouteBox.setVisible (false);
+        boardNewRouteButton.setVisible (false);
+        boardDeleteRouteButton.setVisible (false);
         fxRackViewport.setVisible (false);
         settingsViewport.setVisible (false);
         visualizerViewport.setVisible (false);
@@ -3274,7 +3416,6 @@ private:
         {
             themeManager.savePreference (themePrefFile);
             saveStore.commit ("theme");
-            refreshDiscordPresence();
             settingsSections.clear();
             buildSettingsTab();
             applyAllExperimental(); // re-sync the freshly-rebuilt Experimental toggles to the current state
@@ -3288,6 +3429,204 @@ private:
         rgbControlPanel->onSettingsChanged = [this] { rgbEngine.savePreference (rgbPrefFile); saveStore.commit ("rgb"); };
 
         layoutThemeCreatorContent (themeCreatorContent.getWidth() > 0 ? themeCreatorContent.getWidth() : getWidth());
+    }
+
+    void updateAutotuneReadout()
+    {
+        if (currentTab != Tab::FxRack)
+            return;
+        juce::String text;
+        if (! engine.params.autotuneEnabled.load())
+            text = vlab::ui::tr ("Autotune is off");
+        else
+        {
+            const float heard = engine.autoTune.detectedMidi.load();
+            const float target = engine.autoTune.targetMidi.load();
+            auto describe = [] (float midi, bool withCents)
+            {
+                const int n = (int) std::lround (midi);
+                juce::String t = juce::String (vlab::dsp::AutoTune::noteName (n)) + juce::String (n / 12 - 1);
+                if (withCents)
+                {
+                    const int cents = (int) std::lround ((midi - (float) n) * 100.0f);
+                    t << (cents >= 0 ? " +" : " ") << cents << "c";
+                }
+                return t;
+            };
+            text = heard <= 0.0f ? vlab::ui::tr ("Listening... (no pitch)")
+                                 : vlab::ui::tr ("Singing") + ": " + describe (heard, true)
+                                     + "   ->   " + vlab::ui::tr ("Output") + ": " + describe (target, false);
+        }
+        if (autotuneReadout.getText() != text)
+            autotuneReadout.setText (text, juce::dontSendNotification);
+    }
+
+    // The viewport belonging to the tab that's on screen (null for App Mod full-view canvases, which handle their own wheel).
+    juce::Viewport* getActiveViewport()
+    {
+        switch (currentTab)
+        {
+            case Tab::Board:        return &boardViewport;
+            case Tab::FxRack:       return &fxRackViewport;
+            case Tab::Settings:     return &settingsViewport;
+            case Tab::Visualizer:   return &visualizerViewport;
+            case Tab::Mods:         return &modsViewport;
+            case Tab::Synth:        return &synthViewport;
+            case Tab::ThemeCreator: return &themeCreatorViewport;
+            case Tab::Tts:          return &ttsViewport;
+        }
+        return nullptr;
+    }
+
+    // v1.9.6: "Mouse wheel adjusts sliders" setting. With it off, sliders and drop-downs pass the wheel up to the page
+    // so scrolling never gets "caught" on a control. FxSection applies it to everything it creates; this pass covers
+    // every other slider/combo in the window (board volume/speed, sidebar, Theme Creator, ...).
+    static void applyScrollWheelPolicy (juce::Component& root)
+    {
+        const bool on = FxSection::sliderWheelEnabled;
+        for (auto* child : root.getChildren())
+        {
+            if (auto* sl = dynamic_cast<juce::Slider*> (child))
+                sl->setScrollWheelEnabled (on);
+            else if (auto* cb = dynamic_cast<juce::ComboBox*> (child))
+                cb->setScrollWheelEnabled (on);
+            applyScrollWheelPolicy (*child);
+        }
+    }
+
+    void saveSliderWheelPreference()
+    {
+        auto* obj = new juce::DynamicObject();
+        obj->setProperty ("enabled", FxSection::sliderWheelEnabled);
+        sliderWheelPrefFile.replaceWithText (juce::JSON::toString (juce::var (obj)));
+        saveStore.commit ("sliderWheel");
+    }
+
+    // ── language mods: translate any literal English text ───────────────────
+    // Plain labels and buttons keep their English source text in a component property, so switching language (or back
+    // to English) always starts from the original wording, while text the app changes later (a status line, "Stop
+    // Engine", ...) is picked up as the new English source instead of being overwritten with a stale translation.
+    void translateOneComponent (juce::Component& c)
+    {
+        auto retext = [this, &c] (const juce::String& current, const std::function<void (const juce::String&)>& setter)
+        {
+            auto& props = c.getProperties();
+            juce::String source = current;
+            if (props.contains ("vlabTr") && props["vlabTr"].toString() == current)
+                source = props["vlabEn"].toString();
+            const auto translated = translationManager.text (source);
+            if (translated != current)
+                setter (translated);
+            props.set ("vlabEn", source);
+            props.set ("vlabTr", translated);
+        };
+
+        if (auto* label = dynamic_cast<juce::Label*> (&c))
+        {
+            if (! label->isEditable())
+                retext (label->getText(), [label] (const juce::String& t) { label->setText (t, juce::dontSendNotification); });
+        }
+        else if (auto* button = dynamic_cast<juce::Button*> (&c))
+        {
+            retext (button->getButtonText(), [button] (const juce::String& t) { button->setButtonText (t); });
+        }
+    }
+
+    void retranslateTree (juce::Component& root)
+    {
+        for (auto* child : root.getChildren())
+        {
+            if (auto* fx = dynamic_cast<FxSection*> (child))
+            {
+                fx->retranslate();
+                fx->forEachCustomComponent ([this] (juce::Component& cc) { translateOneComponent (cc); retranslateTree (cc); });
+                continue;
+            }
+            if (dynamic_cast<juce::Slider*> (child) != nullptr || dynamic_cast<juce::TextEditor*> (child) != nullptr)
+                continue;
+            translateOneComponent (*child);
+            retranslateTree (*child);
+        }
+    }
+
+    void collectTranslatableTree (juce::Component& root, juce::StringArray& out)
+    {
+        auto consider = [&out] (const juce::String& text)
+        {
+            const auto t = text.trim();
+            if (t.length() < 2 || ! t.containsAnyOf ("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"))
+                return;
+            if (t.containsAnyOf ("0123456789%\n")) // live readouts ("CPU 12%", device names), not fixed UI text
+                return;
+            out.addIfNotAlreadyThere (t);
+        };
+
+        for (auto* child : root.getChildren())
+        {
+            if (auto* fx = dynamic_cast<FxSection*> (child))
+            {
+                juce::StringArray fromSection;
+                fx->collectTranslatableText (fromSection);
+                for (auto& t : fromSection) consider (t);
+                fx->forEachCustomComponent ([&] (juce::Component& cc) { collectTranslatableTree (cc, out); });
+                continue;
+            }
+            if (dynamic_cast<juce::Slider*> (child) != nullptr || dynamic_cast<juce::TextEditor*> (child) != nullptr)
+                continue;
+            if (auto* label = dynamic_cast<juce::Label*> (child))
+            {
+                if (! label->isEditable())
+                {
+                    auto& props = label->getProperties();
+                    consider (props.contains ("vlabEn") ? props["vlabEn"].toString() : label->getText());
+                }
+            }
+            else if (auto* button = dynamic_cast<juce::Button*> (child))
+            {
+                auto& props = button->getProperties();
+                consider (props.contains ("vlabEn") ? props["vlabEn"].toString() : button->getButtonText());
+            }
+            collectTranslatableTree (*child, out);
+        }
+    }
+
+    void exportLanguageTemplate()
+    {
+        // Run once in English first so the labels/buttons hold their original wording while we read them.
+        const auto activeLanguage = translationManager.getLastAppliedLanguageName();
+        translationManager.applyLanguage ("English");
+        applyTranslations();
+
+        juce::StringArray found;
+        collectTranslatableTree (*this, found);
+        found.addIfNotAlreadyThere ("Empty");
+        for (auto& r : { "Route 1 (after FX)", "Route 2 (through FX)" })
+            found.addIfNotAlreadyThere (r);
+        for (int i = 0; i < (int) vlab::kSbNumPoints; ++i)
+            found.addIfNotAlreadyThere (vlab::soundboardInjectPointName (i));
+        found.sort (true);
+
+        auto* strings = new juce::DynamicObject();
+        for (auto& kv : translationManager.getDefaultKeyStrings())
+            strings->setProperty (juce::Identifier (kv.first), kv.second); // the original fixed keys
+        for (auto& t : found)
+            strings->setProperty (juce::Identifier (t), t); // every English string: edit the right-hand side
+        auto* root = new juce::DynamicObject();
+        root->setProperty ("name", "My Language");
+        root->setProperty ("_how_to_use", "Rename this file to something.lang.json and put it in mods/languages. Change the text on the "
+                                          "RIGHT of each line, leave the left side alone. Delete any line you don't want to translate.");
+        root->setProperty ("strings", juce::var (strings));
+
+        const auto out = languagesFolder.getChildFile ("_english_template.json");
+        out.replaceWithText (juce::JSON::toString (juce::var (root)));
+
+        if (translationManager.applyLanguage (activeLanguage))
+            applyTranslations();
+
+        juce::AlertWindow::showMessageBoxAsync (juce::AlertWindow::InfoIcon, "vlab",
+            "Wrote " + juce::String (found.size()) + " translatable strings to:\n" + out.getFullPathName()
+            + "\n\nCopy it to something.lang.json in the same folder, translate the right-hand side, then Reload All Mods.");
+        out.revealToUser();
     }
 
     void applyTranslations()
@@ -3327,6 +3666,12 @@ private:
 
         speakButton.setButtonText (tr.t ("speak"));
         stopTtsButton.setButtonText (tr.t ("stopTts"));
+
+        // v1.9.6: then everything else, by literal English text (see TranslationManager::text())
+        retranslateTree (*this);
+        refreshRouteControls();
+        resized();
+        repaint();
     }
 
     void reapplyThemeAndMod()
@@ -3433,7 +3778,6 @@ private:
         applyAllPerformance();
         layoutSettingsContent (settingsContent.getWidth() > 0 ? settingsContent.getWidth() : getWidth());
 
-        refreshDiscordPresence();
         reloadOverlay = nullptr;
     }
 
@@ -3456,7 +3800,7 @@ private:
                 juce::String label = juce::String (mod->info.name) + " by " + juce::String (mod->info.author)
                                       + " (v" + juce::String (mod->info.version) + ") [" + status + "]";
                 auto* modPtr = mod.get();
-                auto& toggle = list.addToggle (label, mod->enabled, [this, modPtr] (bool v) { modPtr->enabled = v; refreshDiscordPresence(); });
+                auto& toggle = list.addToggle (label, mod->enabled, [this, modPtr] (bool v) { modPtr->enabled = v; });
                 toggle.setEnabled (mod->initOk);
             }
         }
@@ -3475,11 +3819,11 @@ private:
 
             auto section = std::make_unique<FxSection> ("Mod: " + juce::String (mod->info.name), "X");
             section->setCollapsible (true);
-            section->onCollapsedChanged = [this] { layoutFxRackContent (fxRackContent.getWidth() > 0 ? fxRackContent.getWidth() : getWidth() - getSidebarWidth() - 36); };
+            section->onCollapsedChanged = [this] { relayoutFxRack(); };
             fxRackContent.addAndMakeVisible (*section);
 
             auto* modPtr = mod.get();
-            section->addToggle ("Enabled", modPtr->enabled, [this, modPtr] (bool v) { modPtr->enabled = v; refreshDiscordPresence(); });
+            section->addToggle ("Enabled", modPtr->enabled, [this, modPtr] (bool v) { modPtr->enabled = v; });
 
             for (int i = 0; i < (int) modPtr->params.size(); ++i)
             {
@@ -3495,7 +3839,7 @@ private:
             modFxSections.push_back (std::move (section));
         }
 
-        layoutFxRackContent (fxRackContent.getWidth() > 0 ? fxRackContent.getWidth() : getWidth() - getSidebarWidth() - 36);
+        relayoutFxRack();
     }
 
     void layoutModsContent (int width)
@@ -3954,6 +4298,16 @@ private:
         boardContent.setSize (width, y + (col > 0 ? cardH + 14 : 0));
     }
 
+    // v1.9.6: always re-lay the FX rack out from the VIEWPORT width. The old collapse/expand callbacks passed
+    // fxRackContent.getWidth(), but layoutFxRackModern() shrinks that by the scrollbar gutter (width -= 14)
+    // before sizing the content, so every collapse/expand fed it back in and the rack got 14px narrower each time.
+    void relayoutFxRack()
+    {
+        const int w = fxRackViewport.getWidth() > 0 ? fxRackViewport.getWidth()
+                                                    : getWidth() - getSidebarWidth() - 36;
+        layoutFxRackContent (w);
+    }
+
     void layoutFxRackContent (int width)
     {
         if (modernUi) { layoutFxRackModern (width); return; }
@@ -4140,6 +4494,11 @@ private:
         boardSpeedSlider.setVisible (tab == Tab::Board);
         boardLoopToggle.setVisible (tab == Tab::Board);
         boardReverseToggle.setVisible (tab == Tab::Board);
+        boardRouteLabel.setVisible (tab == Tab::Board);
+        boardRouteInfoLabel.setVisible (tab == Tab::Board);
+        boardRouteBox.setVisible (tab == Tab::Board);
+        boardNewRouteButton.setVisible (tab == Tab::Board);
+        boardDeleteRouteButton.setVisible (tab == Tab::Board);
         if (tabEchoPanel_ != nullptr)
         {
             tabEchoPanel_->setVisible (tab == Tab::Board);
@@ -4161,78 +4520,13 @@ private:
         synthTabButton.setToggleState (tab == Tab::Synth, juce::dontSendNotification);
         themeCreatorTabButton.setToggleState (tab == Tab::ThemeCreator, juce::dontSendNotification);
         ttsTabButton.setToggleState (tab == Tab::Tts, juce::dontSendNotification);
+        applyScrollWheelPolicy (*this); // cheap, and catches anything a rebuild created since the last tab switch
 
         importButton.setVisible (tab == Tab::Board);
         searchBox.setVisible (! modernUi || tab == Tab::Board);
         resized(); // top bar layout depends on tab-button visibility
         repaint();
 
-        refreshDiscordPresence();
-
-    }
-
-    void saveDiscordRpcPreference()
-    {
-        auto obj = std::make_unique<juce::DynamicObject>();
-        obj->setProperty ("enabled", discordRpcEnabled);
-        discordRpcPrefFile.replaceWithText (juce::JSON::toString (juce::var (obj.release())));
-        saveStore.commit ("discordRpc");
-    }
-
-    void loadDiscordRpcPreference()
-    {
-        discordRpcEnabled = true; // on by default
-        if (! discordRpcPrefFile.existsAsFile())
-            return;
-        auto parsed = juce::JSON::parse (discordRpcPrefFile);
-        if (! parsed.isObject())
-            return;
-        discordRpcEnabled = (bool) parsed.getProperty ("enabled", true);
-    }
-
-    void refreshDiscordPresence()
-    {
-        if (currentTab != Tab::Board)
-        {
-            discordNowPlayingSlot = -1;
-            const auto text = tabDiscordState (currentTab);
-            if (currentTab == lastGenericDiscordTab && text == lastGenericDiscordText)
-                return; // nothing's actually changed, don't spam an identical update
-            lastGenericDiscordTab = currentTab;
-            lastGenericDiscordText = text;
-            discordRPC.setPresence ("Using vlab", text);
-            return;
-        }
-
-        vlab::SoundboardCore::NowPlayingInfo info;
-        if (! soundboard.getNowPlaying (info))
-        {
-            if (discordNowPlayingSlot != -1)
-            {
-                discordNowPlayingSlot = -1;
-                discordRPC.setPresence ("Using vlab", tabDiscordState (currentTab));
-            }
-            return;
-        }
-
-        if (info.slotIdx == discordNowPlayingSlot)
-            return; // already showing this one, Discord's own clock keeps the bar moving
-
-        discordNowPlayingSlot = info.slotIdx;
-        const auto boardName = juce::String (soundboard.getBoardName (soundboard.getActiveBoardIndex()));
-        const auto details = "Playing \"" + info.name + "\"";
-
-        if (info.loop)
-        {
-            discordRPC.setPresence (details, "Looping on " + boardName, false);
-        }
-        else
-        {
-            const juce::int64 nowEpoch = juce::Time::getCurrentTime().toMilliseconds() / 1000;
-            const juce::int64 startEpoch = nowEpoch - (juce::int64) info.elapsedSeconds;
-            const juce::int64 endEpoch = startEpoch + (juce::int64) juce::jmax (1.0, info.totalSeconds);
-            discordRPC.setPresenceWithRange (details, "On " + boardName, startEpoch, endEpoch);
-        }
     }
 
     static juce::String tabToName (Tab tab)
@@ -4261,73 +4555,6 @@ private:
         for (auto& e : table)
             if (name.equalsIgnoreCase (e.first)) { outTab = e.second; return true; }
         return false;
-    }
-
-    juce::String tabDiscordState (Tab tab)
-    {
-        switch (tab)
-        {
-            case Tab::Board:        return boardDiscordState();
-            case Tab::FxRack:       return fxRackDiscordState();
-            case Tab::Settings:     return "In Settings";
-            case Tab::Visualizer:   return visualizerDiscordState();
-            case Tab::Mods:         return modsDiscordState();
-            case Tab::Synth:        return synthDiscordState();
-            case Tab::ThemeCreator: return themeDiscordState();
-            case Tab::Tts:          return ttsDiscordState();
-        }
-        return "Using vlab";
-    }
-
-    juce::String boardDiscordState()
-    {
-        return "Browsing the Soundboard";
-    }
-
-    juce::String fxRackDiscordState()
-    {
-        const auto preset = presetBox.getText();
-        return preset.isNotEmpty() ? ("FX preset: " + preset) : juce::String ("Tweaking the FX Rack");
-    }
-
-    juce::String synthDiscordState()
-    {
-        if (sequencer != nullptr && ! sequencer->currentSong.empty() && synth.songActive)
-            return "Playing \"" + juce::String (sequencer->currentSong) + "\"";
-        if (synthParams.arpOn.load())
-            return "Arpeggiating";
-        return "In the Synth";
-    }
-
-    juce::String modsDiscordState()
-    {
-        juce::StringArray enabledNames;
-        for (auto& mod : modHost.getMods())
-            if (mod->enabled)
-                enabledNames.add (juce::String (mod->info.name));
-
-        if (enabledNames.isEmpty())
-            return "Browsing Mods";
-        if (enabledNames.size() == 1)
-            return "Using mod: " + enabledNames[0];
-        return "Using " + juce::String (enabledNames.size()) + " mods (" + enabledNames[0] + " + more)";
-    }
-
-    juce::String themeDiscordState()
-    {
-        const auto name = themeManager.getLastAppliedThemeName();
-        return name.isNotEmpty() ? ("Editing theme: " + name) : juce::String ("Creating a Theme");
-    }
-
-    juce::String visualizerDiscordState()
-    {
-        const auto viz = vizChangerCombo.getText();
-        return viz.isNotEmpty() ? ("Watching: " + viz) : juce::String ("Watching the Visualizer");
-    }
-
-    juce::String ttsDiscordState()
-    {
-        return soundboard.isTtsSpeaking() ? "Speaking..." : juce::String ("In Live TTS");
     }
 
     void filterBoard (const juce::String& query)
@@ -4381,7 +4608,7 @@ private:
                 {
                     if (! f.existsAsFile())
                         continue;
-                    while (nextSlot < kVisibleSlots && (! soundboard.getSlots()[(size_t) nextSlot].path.empty() || soundboard.getSlots()[(size_t) nextSlot].data != nullptr))
+                    while (nextSlot < kVisibleSlots && soundboard.getSlots()[(size_t) nextSlot].data != nullptr)
                         ++nextSlot;
                     if (nextSlot >= kVisibleSlots)
                         break;
