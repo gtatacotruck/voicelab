@@ -1,11 +1,12 @@
 #pragma once
 #include "AudioEngineParams.h"
 #include <juce_core/juce_core.h>
-
+// dont even try to recover this i made this really bad 
 namespace vlab
 {
     #define VLAB_FX_FLOAT_FIELDS(X) \
-        X(gain) X(pitch) X(pan) X(masterOutGain) X(noiseGate) \
+        X(gain) X(pitch) X(pan) X(masterOutGain) \
+        X(voiceIsolationStrength) X(voiceIsolationReduceDb) X(voiceIsolationSensitivity) \
         X(distortion) \
         X(chorusRate) X(chorusDepth) X(chorusMix) \
         X(phaserRate) X(phaserDepth) X(phaserMix) \
@@ -53,7 +54,7 @@ namespace vlab
         X(escRepeatEnabled) X(accRepeatEnabled) X(decRepeatEnabled) X(pitchDownRepeatEnabled) X(scatterEnabled) \
         X(reverseBurstEnabled) X(glitchGateEnabled) X(freezeEnabled) X(vinylStopEnabled) \
         X(brokenDelayEnabled) X(pitchJumpEnabled) X(backmaskEnabled) X(microFreezeEnabled) X(bufferShuffleEnabled) \
-        X(autotuneEnabled)
+        X(autotuneEnabled) X(voiceIsolationEnabled)
 
     #define VLAB_FX_INT_FIELDS(X) \
         X(stutterType) X(bufferShuffleChunks) X(autotuneKey) X(autotuneScale)
