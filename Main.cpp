@@ -1,3 +1,4 @@
+#include <set>
 
 #ifndef JUCE_MODAL_LOOPS_PERMITTED
  #define JUCE_MODAL_LOOPS_PERMITTED 1
@@ -45,16 +46,22 @@
 #include "Mods/AppModHost.h"
 #include "UI/TranslationManager.h"
 #include "UI/Tr.h"
+#include "UI/DiscordRpc.h"
+#include "UI/RelaxMode.h"
+#include "UI/KeybindListPanel.h"
 #include "SoundboardRoutes.h"
 #include "Update/UpdateChecker.h"
 
-static constexpr const char* kAppVersionString = "1.9.6";
+// tab echo is hidden for now, the code is still here
+static constexpr bool kShowTabEcho = false;
+// put your Discord application ID here if you want rich presence to work out of the box
+static constexpr const char* kDefaultDiscordClientId = "";
+static constexpr const char* kAppVersionString = "1.9.7";
 #include "UI/ModderView.h"
 
 using namespace vlab::ui;
 
 // Board grid now shows the full soundboard (SOUND_LIMIT = 100 slots).
-static constexpr int kVisibleSlots = vlab::kSoundLimit;
 
 class MainComponent : public juce::AudioAppComponent
 {
@@ -83,7 +90,13 @@ public:
             vlab::dsp::applyPan (out, tts.pan.load(), n);
         };
         engine.synthRunning  = [this] { return synth.running.load(); };
-        engine.synthProcess  = [this] (vlab::AudioBuffer& out, int n) { synth.process (out, n, synthParams); };
+        engine.synthProcess  = [this] (vlab::AudioBuffer& out, int n)
+        {
+            synth.process (out, n, synthParams);
+            const float rv = synthParams.reverbMix.load();
+            if (rv > 0.001f)
+                synthReverb.process (out, rv, synthParams.reverbDecay.load(), n);
+        };
         engine.modProcess    = [this] (vlab::AudioBuffer& out, int n) { modHost.process (out, n); };
 
         modsFolder = juce::File::getCurrentWorkingDirectory().getChildFile ("mods").getChildFile ("dll");
@@ -240,6 +253,67 @@ public:
                 resetSynthPatch();
                 return "true";
             }
+            if (name == "list_themes")
+            {
+                juce::Array<juce::var> arr;
+                for (auto& n : themeManager.getThemeNames())
+                {
+                    const auto info = themeManager.getThemeInfo (n);
+                    auto* o = new juce::DynamicObject();
+                    o->setProperty ("name", n);
+                    o->setProperty ("builtIn", info.builtIn);
+                    o->setProperty ("author", info.author);
+                    o->setProperty ("description", info.description);
+                    arr.add (juce::var (o));
+                }
+                return juce::JSON::toString (juce::var (arr), true);
+            }
+            if (name == "get_theme")
+            {
+                const auto& pal = vlab::ui::palette();
+                auto hex = [] (juce::Colour c) { return "#" + c.toDisplayString (true).toLowerCase(); };
+                auto* o = new juce::DynamicObject();
+                o->setProperty ("name", themeManager.getLastAppliedThemeName());
+                o->setProperty ("bg", hex (pal.bg));         o->setProperty ("panel", hex (pal.panel));
+                o->setProperty ("panelAlt", hex (pal.panelAlt)); o->setProperty ("stroke", hex (pal.stroke));
+                o->setProperty ("accent", hex (pal.accent)); o->setProperty ("accentDim", hex (pal.accentDim));
+                o->setProperty ("accent2", hex (pal.accent2)); o->setProperty ("text", hex (pal.text));
+                o->setProperty ("textDim", hex (pal.textDim)); o->setProperty ("danger", hex (pal.danger));
+                return juce::JSON::toString (juce::var (o), true);
+            }
+            if (name == "set_theme")
+                return applyThemeByName (argJson.trim()) ? "true" : "false";
+            if (name == "set_ui_preset")
+                return applyUiPresetByName (argJson.trim()) ? "true" : "false";
+            if (name == "list_synth_presets")
+            {
+                juce::Array<juce::var> arr;
+                for (int i = 0; i < synthPresetBox.getNumItems(); ++i)
+                    arr.add (synthPresetBox.getItemText (i));
+                return juce::JSON::toString (juce::var (arr), true);
+            }
+            if (name == "load_synth_preset")
+            {
+                loadSynthPresetByName (argJson.trim());
+                return "true";
+            }
+            if (name == "set_relax_mode")
+            {
+                setRelaxMode (argJson.trim() == "true");
+                return relaxActive ? "true" : "false";
+            }
+            if (name == "list_keybinds")
+            {
+                juce::Array<juce::var> arr;
+                for (auto& e : collectKeybindEntries())
+                {
+                    auto* o = new juce::DynamicObject();
+                    o->setProperty ("owner", e.owner);
+                    o->setProperty ("combo", e.combo);
+                    arr.add (juce::var (o));
+                }
+                return juce::JSON::toString (juce::var (arr), true);
+            }
             return juce::String(); // unrecognized command name
         };
         appModHost.onActionsChanged = [this] { rebuildAppModsUi(); };
@@ -292,8 +366,7 @@ public:
             const auto savedLanguage = translationManager.loadPreference (languagePrefFile);
             translationManager.applyLanguage (savedLanguage.isNotEmpty() ? savedLanguage : "English");
         }
-        // v1.9.6: from here on ANY text built through vlab::ui::tr() (FX rack rows, section titles, ...) is looked up in the
-        // active language mod by its literal English wording. Installed before the tabs are built so they come out translated.
+        // needs to be in place before the tabs get built
         vlab::ui::translateHook() = [this] (const juce::String& english) { return translationManager.text (english); };
 
         sliderWheelPrefFile = saveStore.stagingFileFor ("sliderWheel");
@@ -308,6 +381,36 @@ public:
         if (sbRoutesPrefFile.existsAsFile())
             sbRoutes.fromVar (juce::JSON::parse (sbRoutesPrefFile));
         engine.sbInjectPoint = sbRoutes.getSelectedRoute().injectPoint;
+
+        discordPrefFile = saveStore.stagingFileFor ("discord");
+        if (discordPrefFile.existsAsFile())
+        {
+            auto parsed = juce::JSON::parse (discordPrefFile);
+            if (parsed.isObject())
+            {
+                discordEnabled = (bool) parsed.getProperty ("enabled", false);
+                discordShowBoard = (bool) parsed.getProperty ("showBoard", true);
+                discordShowSound = (bool) parsed.getProperty ("showSound", false);
+                discordShowFx = (bool) parsed.getProperty ("showFx", true);
+                discordClientId = parsed.getProperty ("clientId", juce::String()).toString();
+            }
+        }
+        if (discordClientId.isEmpty())
+            discordClientId = kDefaultDiscordClientId;
+        discordRpc.configure (discordEnabled, discordClientId);
+
+        themePairPrefFile = saveStore.stagingFileFor ("themePairing");
+        if (themePairPrefFile.existsAsFile())
+            themeCanSetUiPreset = (bool) juce::JSON::parse (themePairPrefFile).getProperty ("enabled", true);
+
+        relaxOverlay.onExit = [this] { setRelaxMode (false); };
+        relaxOverlay.getSamples = [this] () -> const std::vector<float>& { return engine.visData; };
+        relaxOverlay.getNowPlaying = [this]
+        {
+            vlab::SoundboardCore::NowPlayingInfo info;
+            return soundboard.getNowPlaying (info) ? info.name : juce::String();
+        };
+        addChildComponent (relaxOverlay);
 
         addAndMakeVisible (backgroundLayer);
         backgroundLayer.setOpacity (0.5f);
@@ -410,6 +513,8 @@ public:
     ~MainComponent() override
     {
         vlab::ui::translateHook() = {};
+        if (relaxActive)
+            juce::Desktop::getInstance().setKioskModeComponent (nullptr);
         shutdownAudio();
         monitorOut.close();
         juce::LookAndFeel::setDefaultLookAndFeel (nullptr);
@@ -417,6 +522,33 @@ public:
 
     bool keyPressed (const juce::KeyPress& key) override
     {
+        const bool isV = key.getKeyCode() == 'V' || key.getKeyCode() == 'v';
+        if (relaxActive)
+        {
+            if (key.getKeyCode() == juce::KeyPress::escapeKey
+                || (isV && ! key.getModifiers().isAnyModifierKeyDown()))
+            {
+                setRelaxMode (false);
+                return true;
+            }
+        }
+        else if (pendingBind == BindTarget::None && isV && key.getModifiers().isCtrlDown() && key.getModifiers().isShiftDown())
+        {
+            setRelaxMode (true);
+            return true;
+        }
+
+        if (key.getModifiers().isCtrlDown() && ! key.getModifiers().isShiftDown() && (key.getKeyCode() == 'F' || key.getKeyCode() == 'f')
+            && pendingBind == BindTarget::None && ! relaxActive && ! isBoundToSlot (key))
+        {
+            showTab (Tab::Board);
+            searchBox.grabKeyboardFocus();
+            return true;
+        }
+
+        if (handleSynthComputerKey (key))
+            return true;
+
         if (pendingBind != BindTarget::None)
         {
             if (key.getKeyCode() == juce::KeyPress::escapeKey)
@@ -431,6 +563,13 @@ public:
             const auto desc = key.getTextDescription().toLowerCase();
             if (desc.isEmpty())
                 return true; // a lone modifier etc., keep waiting for a real combo
+
+            if (desc.replace (" ", "") == "ctrl+shift+v")
+            {
+                recorderStatusLabel.setText ("Ctrl+Shift+V is reserved for relax mode, pick another combo.", juce::dontSendNotification);
+                recorderStatusLabel.setColour (juce::Label::textColourId, palette().danger);
+                return true;
+            }
 
             if (pendingBind == BindTarget::Slot && pendingBindSlot >= 0)
             {
@@ -518,6 +657,132 @@ public:
         return false;
     }
 
+    bool isBoundToSlot (const juce::KeyPress& key)
+    {
+        const auto desc = key.getTextDescription().toLowerCase();
+        for (auto& sl : soundboard.getSlots())
+            if (! sl.hotkey.empty() && juce::String (sl.hotkey) == desc)
+                return true;
+        return false;
+    }
+
+    void setRelaxMode (bool on)
+    {
+        if (on == relaxActive)
+            return;
+        relaxActive = on;
+        if (on)
+        {
+            relaxOverlay.setBounds (getLocalBounds());
+            relaxOverlay.setVisible (true);
+            relaxOverlay.toFront (true);
+            relaxOverlay.start();
+            juce::Desktop::getInstance().setKioskModeComponent (getTopLevelComponent(), false);
+        }
+        else
+        {
+            juce::Desktop::getInstance().setKioskModeComponent (nullptr);
+            relaxOverlay.stop();
+            relaxOverlay.setVisible (false);
+            grabKeyboardFocus();
+        }
+        updateDiscordPresence();
+    }
+
+    // discord
+    void saveDiscordPreference()
+    {
+        auto* o = new juce::DynamicObject();
+        o->setProperty ("enabled", discordEnabled);
+        o->setProperty ("showBoard", discordShowBoard);
+        o->setProperty ("showSound", discordShowSound);
+        o->setProperty ("showFx", discordShowFx);
+        o->setProperty ("clientId", discordClientId);
+        discordPrefFile.replaceWithText (juce::JSON::toString (juce::var (o)));
+        saveStore.commit ("discord");
+        discordRpc.configure (discordEnabled, discordClientId);
+    }
+
+    void updateDiscordPresence()
+    {
+        discordStatusLabel.setText (vlab::ui::tr ("Status") + ": " + vlab::ui::tr (discordRpc.getStatus()), juce::dontSendNotification);
+        if (! discordEnabled)
+            return;
+
+        vlab::DiscordRpc::Activity a;
+        a.startSeconds = appStartSeconds;
+        a.largeImageKey = "vlab";
+        a.largeImageText = juce::String ("VLAB ") + kAppVersionString;
+
+        if (relaxActive)
+            a.details = "Just chilling";
+        else if (running.load())
+            a.details = "Live on the mic";
+        else
+            a.details = "Idle";
+
+        juce::StringArray bits;
+        if (discordShowFx && engine.params.autotuneEnabled.load())
+            bits.add ("Autotune on");
+        if (discordShowBoard)
+            bits.add ("Board: " + juce::String (soundboard.getBoardName (soundboard.getActiveBoardIndex())));
+        if (discordShowSound)
+        {
+            vlab::SoundboardCore::NowPlayingInfo info;
+            if (soundboard.getNowPlaying (info) && info.name.isNotEmpty())
+                bits.add ("Playing " + info.name);
+        }
+        a.state = bits.joinIntoString (" | ");
+        discordRpc.setActivity (a);
+    }
+
+    // keybind list
+    std::vector<vlab::ui::KeybindListPanel::Entry> collectKeybindEntries()
+    {
+        using Entry = vlab::ui::KeybindListPanel::Entry;
+        std::vector<Entry> out;
+        if (recordHotkey.isNotEmpty())
+            out.push_back ({ "Record toggle", recordHotkey, [this] { unbindRecordHotkey(); } });
+        out.push_back ({ "Relax mode", "ctrl+shift+v", {} });
+
+        for (auto& e : soundboard.collectHotkeys())
+        {
+            juce::String owner = juce::String (soundboard.getBoardName (e.board)) + ", slot " + juce::String (e.slot + 1);
+            if (e.slotName != "Empty" && ! e.slotName.empty())
+                owner << " (" << juce::String (e.slotName) << ")";
+            out.push_back ({ owner, juce::String (e.hotkey), [this, board = e.board, slot = e.slot]
+            {
+                soundboard.clearHotkey (board, slot);
+                if (board == soundboard.getActiveBoardIndex() && slot < (int) cards.size())
+                    cards[(size_t) slot]->refreshFromSlot();
+                if (soundboard.onSaveConfigRequested) soundboard.onSaveConfigRequested();
+                refreshGlobalHotkeyWatchList();
+            } });
+        }
+        return out;
+    }
+
+    void confirmClearAllKeybinds()
+    {
+        juce::AlertWindow::showOkCancelBox (juce::AlertWindow::QuestionIcon, "Clear all keybinds",
+            "Remove every soundboard hotkey and the record hotkey? The sounds themselves stay.", "Clear", "Cancel", this,
+            juce::ModalCallbackFunction::create ([this] (int result)
+            {
+                if (result != 1)
+                    return;
+                soundboard.clearAllHotkeys();
+                if (recordHotkey.isNotEmpty())
+                {
+                    recordHotkey.clear();
+                    saveRecordHotkeyPreference();
+                }
+                for (auto& c : cards)
+                    if (c) c->refreshFromSlot();
+                if (soundboard.onSaveConfigRequested) soundboard.onSaveConfigRequested();
+                refreshGlobalHotkeyWatchList();
+            }));
+    }
+
     void refreshGlobalHotkeyWatchList()
     {
         juce::StringArray descriptions;
@@ -527,6 +792,7 @@ public:
             if (! s.hotkey.empty())
                 descriptions.add (juce::String (s.hotkey));
         globalHotkeys.setWatchList (descriptions);
+        keybindPanel.refresh();
     }
 
     void beginHotkeyBind (int slotIdx)
@@ -601,10 +867,9 @@ public:
                     if (soundboard.getSlots()[(size_t) i].data == nullptr) { target = i; break; }
                 if (target < 0)
                 {
-                    recorderStatusLabel.setText ("No empty slot available, pick a target slot first.", juce::dontSendNotification);
-                    recorderStatusLabel.setColour (juce::Label::textColourId, palette().danger);
-                    if (recordToggleBtn) recordToggleBtn->setToggleState (false, juce::dontSendNotification);
-                    return;
+                    target = soundboard.getSlotCount();
+                    soundboard.ensureSlotCount (target + 1);
+                    syncCards();
                 }
             }
             soundboard.startRecording (target);
@@ -617,6 +882,7 @@ public:
             if (recordToggleBtn) recordToggleBtn->setToggleState (false, juce::dontSendNotification);
             recorderStatusLabel.setText ("Recording saved to " + recFolder.getFileName() + "/.", juce::dontSendNotification);
             recorderStatusLabel.setColour (juce::Label::textColourId, palette().accent);
+            syncCards();
             for (auto& c : cards)
                 if (c) c->refreshFromSlot(); // whichever slot just got the new file shows up
         }
@@ -830,9 +1096,11 @@ public:
     }
 
     // ── audio ─────────────────────────────────────────────────────────────
-    void prepareToPlay (int samplesPerBlockExpected, double) override
+    void prepareToPlay (int samplesPerBlockExpected, double deviceRate) override
     {
-        engine.prepare (vlab::kSampleRate, samplesPerBlockExpected);
+        statsPanel.sampleRate = deviceRate;
+        soundboard.setDeviceRateRatio (vlab::kSampleRate / juce::jmax (1.0, deviceRate));
+        engine.prepare (deviceRate, samplesPerBlockExpected);
         inBuf.setSize (2, samplesPerBlockExpected);
         outBuf.setSize (2, samplesPerBlockExpected);
         statsPanel.bufferSize = samplesPerBlockExpected;
@@ -888,9 +1156,7 @@ public:
 
     void releaseResources() override {}
 
-    // v1.9.6: scrolling with the cursor on the window background (the margins, the gaps between panels, the sidebar's
-    // empty space, the background image) used to do nothing, because only the viewports themselves handled the wheel.
-    // Anything that doesn't use the wheel itself ends up here and is handed to whichever tab is showing.
+    // anything nothing else wanted (margins, gaps, background) scrolls the current tab
     void mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel) override
     {
         if (auto* vp = getActiveViewport())
@@ -927,6 +1193,7 @@ public:
 
     void resized() override
     {
+        relaxOverlay.setBounds (getLocalBounds());
         backgroundLayer.setBounds (getLocalBounds());
 
         auto area = getLocalBounds();
@@ -952,7 +1219,7 @@ public:
             searchBox.setBounds (searchRow);
             boardArea.removeFromTop (8);
         }
-        if (tabEchoPanel_ != nullptr)
+        if (kShowTabEcho && tabEchoPanel_ != nullptr)
         {
             tabEchoPanel_->setBounds (boardArea.removeFromTop (64));
             boardArea.removeFromTop (10);
@@ -1246,6 +1513,7 @@ private:
     struct PianoKeyButton : public juce::Button
     {
         bool isBlack = false;
+        int semitone = 0;
         std::function<void()> onPress, onRelease;
         PianoKeyButton() : juce::Button ({}) {}
 
@@ -1268,6 +1536,13 @@ private:
         void mouseUp (const juce::MouseEvent& e) override { juce::Button::mouseUp (e); if (onRelease) onRelease(); }
     };
     std::vector<std::unique_ptr<PianoKeyButton>> pianoKeyButtons;
+    vlab::dsp::Reverb synthReverb;
+    int synthBaseOctave = 4;
+    juce::Label synthOctaveLabel;
+    juce::TextButton synthOctDownButton { "Oct -" }, synthOctUpButton { "Oct +" };
+    juce::ComboBox synthPresetBox;
+    juce::TextButton synthSavePresetButton { "Save Preset" }, synthRandomButton { "Randomize" };
+    std::set<int> computerKeysDown, mouseKeysDown;
 
     juce::Label presetLabel { {}, "Quick Preset" };
     juce::ComboBox presetBox;
@@ -1283,13 +1558,32 @@ private:
     juce::Slider boardVolumeSlider, boardSpeedSlider;
     juce::ToggleButton boardLoopToggle { "Loop" }, boardReverseToggle { "Reverse" };
 
-    // v1.9.6: soundboard routing, see SoundboardRoutes.h
     vlab::SoundboardRoutes sbRoutes;
     juce::File sbRoutesPrefFile, sliderWheelPrefFile;
     juce::Label boardRouteLabel { {}, "Soundboard route:" }, boardRouteInfoLabel;
     juce::ComboBox boardRouteBox;
     juce::TextButton boardNewRouteButton { "New Route..." }, boardDeleteRouteButton { "Delete" };
     int translateTick = 0;
+
+    vlab::ui::RelaxOverlay relaxOverlay;
+    bool relaxActive = false;
+
+    vlab::DiscordRpc discordRpc;
+    juce::File discordPrefFile;
+    bool discordEnabled = false, discordShowBoard = true, discordShowSound = false, discordShowFx = true;
+    juce::String discordClientId;
+    juce::TextEditor discordIdEditor;
+    juce::Label discordStatusLabel;
+    juce::int64 appStartSeconds = (juce::int64) (juce::Time::currentTimeMillis() / 1000);
+    int discordTick = 0;
+
+    juce::ComboBox* themeCombo = nullptr;
+    juce::ComboBox* uiPresetCombo = nullptr;
+    bool themeCanSetUiPreset = true;
+    juce::File themePairPrefFile;
+    int themeWatchTick = 0;
+
+    vlab::ui::KeybindListPanel keybindPanel;
     juce::Label autotuneReadout;
     juce::TextButton importButton { "Import" };
     juce::TextButton fxRackTabButton { "FX Rack" }, boardTabButton { "Board" };
@@ -1341,7 +1635,8 @@ private:
     vlab::ui::BoardSelectorBar boardSelectorBar; // the row of soundboard "pages" above the grid
     vlab::ui::SmoothViewport boardViewport;
     juce::Component boardContent;
-    std::array<std::unique_ptr<SoundSlotCard>, kVisibleSlots> cards;
+    std::vector<std::unique_ptr<SoundSlotCard>> cards;
+    juce::ComboBox* recordTargetCombo = nullptr;
 
     // fx rack tab: scrollable stack of section cards
     vlab::ui::SmoothViewport fxRackViewport;
@@ -1437,7 +1732,17 @@ private:
         cpuLabel.setText ("CPU " + juce::String ((int) engine.cpuPercent.load()) + "%", juce::dontSendNotification);
 
         updateAutotuneReadout();
-        if (++translateTick >= 40) // ~every 2 s: catch text the app rewrote since the last language pass (e.g. "Stop Engine")
+        if (++themeWatchTick >= 40)
+        {
+            themeWatchTick = 0;
+            pollThemeFolder();
+        }
+        if (++discordTick >= 40)
+        {
+            discordTick = 0;
+            updateDiscordPresence();
+        }
+        if (++translateTick >= 40)
         {
             translateTick = 0;
             if (translationManager.getLastAppliedLanguageName() != "English")
@@ -1604,6 +1909,7 @@ private:
         if (outBox.getText().isNotEmpty()) setup.outputDeviceName = outBox.getText();
         setup.useDefaultInputChannels = true;
         setup.useDefaultOutputChannels = true;
+        setup.sampleRate = vlab::kSampleRate; // otherwise it runs at the device default, often 48k
 
         const auto err = deviceManager.setAudioDeviceSetup (setup, true);
         if (err.isNotEmpty())
@@ -1695,6 +2001,7 @@ private:
         searchBox.setTextToShowWhenEmpty ("Search sounds...", palette().textDim);
         addAndMakeVisible (searchBox);
         searchBox.onTextChange = [this] { filterBoard (searchBox.getText()); };
+        searchBox.onEscapeKey = [this] { searchBox.clear(); grabKeyboardFocus(); };
 
         addAndMakeVisible (stopAllSoundsButton);
         stopAllSoundsButton.getProperties().set ("danger", true);
@@ -1831,8 +2138,38 @@ private:
         boardSelectorBar.refresh (soundboard);
 
         boardContent.setInterceptsMouseClicks (false, true);
-        for (int i = 0; i < kVisibleSlots; ++i)
+        syncCards();
+    }
+
+    // makes sure there is a card for every slot
+    void syncCards()
+    {
+        soundboard.padSlots();
+        const int wanted = soundboard.getSlotCount();
+        const bool grew = (int) cards.size() < wanted;
+        while ((int) cards.size() < wanted)
+            makeCard ((int) cards.size());
+        if (grew)
         {
+            refreshRecorderSlotOptions();
+            layoutBoardContent (boardViewport.getWidth());
+        }
+    }
+
+    void refreshRecorderSlotOptions()
+    {
+        if (recordTargetCombo == nullptr)
+            return;
+        const int keep = recordTargetSlot + 1;
+        recordTargetCombo->clear (juce::dontSendNotification);
+        recordTargetCombo->addItem ("Next Empty Slot", 1);
+        for (int i = 0; i < soundboard.getSlotCount(); ++i)
+            recordTargetCombo->addItem ("Slot " + juce::String (i + 1), i + 2);
+        recordTargetCombo->setSelectedId (juce::jlimit (1, soundboard.getSlotCount() + 1, keep + 1), juce::dontSendNotification);
+    }
+
+    void makeCard (int i)
+    {
             auto card = std::make_unique<SoundSlotCard> (i);
             card->setSlot (&soundboard.getSlots()[(size_t) i]);
             card->onPlay = [this, i] { soundboard.play (i, sbDefaultSpeed, sbDefaultVolume, sbDefaultLoop, sbDefaultReverse); };
@@ -1865,11 +2202,10 @@ private:
                 if (soundboard.onSaveConfigRequested) soundboard.onSaveConfigRequested();
             };
             boardContent.addAndMakeVisible (*card);
-            cards[(size_t) i] = std::move (card);
-        }
+        cards.push_back (std::move (card));
     }
 
-    // ── Soundboard routes (vlab_soundboard.json -> "soundboardRoutes") ─────────
+    // Soundboard routes
     void saveSoundboardRoutes()
     {
         sbRoutesPrefFile.replaceWithText (juce::JSON::toString (sbRoutes.toVar()));
@@ -1950,9 +2286,10 @@ private:
 
     void refreshCardsFromActiveBoard()
     {
+        syncCards();
         auto& activeSlots = soundboard.getSlots();
-        for (int i = 0; i < kVisibleSlots; ++i)
-            if (cards[(size_t) i]) cards[(size_t) i]->setSlot (&activeSlots[(size_t) i]);
+        for (int i = 0; i < (int) cards.size() && i < (int) activeSlots.size(); ++i)
+            cards[(size_t) i]->setSlot (&activeSlots[(size_t) i]);
     }
 
     void switchBoard (int idx)
@@ -2151,10 +2488,15 @@ private:
             return *fxSections.back();
         };
 
-        auto& master = addSection ("Master & Gate", "M");
+        auto& isolation = addSection ("Voice Isolation", "V");
+        auto& isoEnableToggle = isolation.addToggle ("Enable Voice Isolation", p.voiceIsolationEnabled.load(), [&p] (bool v) { p.voiceIsolationEnabled = v; });
+        auto& isoStrengthSlider = isolation.addSlider ("Isolation Strength", 0.0, 1.0, 1.0, [&p] (double v) { p.voiceIsolationStrength = (float) v; });
+        auto& isoReduceSlider = isolation.addSlider ("Background Reduction (dB)", 0.0, 60.0, 30.0, [&p] (double v) { p.voiceIsolationReduceDb = (float) v; }, 0);
+        auto& isoSensSlider = isolation.addSlider ("Voice Sensitivity", 0.1, 0.9, 0.45, [&p] (double v) { p.voiceIsolationSensitivity = (float) v; });
+
+        auto& master = addSection ("Master", "M");
         auto& masterOutSlider = master.addSlider ("Master Out Gain (dB)", -24.0, 24.0, 0.0, [&p] (double v) { p.masterOutGain = (float) v; });
         auto& micGainSlider = master.addSlider ("Mic Input Gain (dB)", -24.0, 24.0, 0.0, [&p] (double v) { p.gain = (float) v; });
-        auto& gateSlider = master.addSlider ("Noise Gate", 0.0, 0.5, 0.0, [&p] (double v) { p.noiseGate = (float) v; }, 3);
 
         auto& eq = addSection ("3-Band EQ", "E");
         auto& eqLoSlider = eq.addSlider ("Low Shelf (dB)", -24.0, 24.0, 0.0, [&p] (double v) { p.eqLo = (float) v; });
@@ -2337,7 +2679,10 @@ private:
             atRefSlider.setValue (p.autotuneRefHz, juce::sendNotificationSync);
             masterOutSlider.setValue (p.masterOutGain, juce::sendNotificationSync);
             micGainSlider.setValue (p.gain, juce::sendNotificationSync);
-            gateSlider.setValue (p.noiseGate, juce::sendNotificationSync);
+            isoEnableToggle.setToggleState (p.voiceIsolationEnabled.load(), juce::dontSendNotification);
+            isoStrengthSlider.setValue (p.voiceIsolationStrength, juce::sendNotificationSync);
+            isoReduceSlider.setValue (p.voiceIsolationReduceDb, juce::sendNotificationSync);
+            isoSensSlider.setValue (p.voiceIsolationSensitivity, juce::sendNotificationSync);
             eqLoSlider.setValue (p.eqLo, juce::sendNotificationSync);
             eqMidSlider.setValue (p.eqMid, juce::sendNotificationSync);
             eqHiSlider.setValue (p.eqHi, juce::sendNotificationSync);
@@ -2570,24 +2915,26 @@ private:
 
         auto themeNames = themeManager.getThemeNames();
         int currentThemeIdx = juce::jmax (0, themeNames.indexOf (themeManager.getLastAppliedThemeName()));
-        general.addCombo ("Theme", themeNames, currentThemeIdx, [this, themeNames] (int idx)
+        themeCombo = &general.addCombo ("Theme", themeNames, currentThemeIdx, [this] (int idx)
         {
-            if (idx >= 0 && idx < themeNames.size())
-            {
-                themeManager.applyTheme (themeNames[idx]);
-                themeManager.savePreference (themePrefFile);
-                saveStore.commit ("theme");
-                rgbEngine.refreshBase();
-                repaint();
-                for (auto* c : { (juce::Component*) &boardContent, &fxRackContent, &settingsContent,
-                                  &visualizerContent, &synthContent, &modsContent, &themeCreatorContent })
-                    c->repaint();
-            }
+            const auto names = themeManager.getThemeNames();
+            if (idx >= 0 && idx < names.size())
+                applyThemeByName (names[idx]);
         });
+        general.addToggle ("A theme can switch the UI preset (if it asks for one)", themeCanSetUiPreset, [this] (bool v)
+        {
+            themeCanSetUiPreset = v;
+            auto* o = new juce::DynamicObject();
+            o->setProperty ("enabled", v);
+            themePairPrefFile.replaceWithText (juce::JSON::toString (juce::var (o)));
+            saveStore.commit ("themePairing");
+        });
+        general.addButton ("Check Themes for Problems", "Lists anything in mods/themes the loader had to ignore or work around",
+            [this] { showThemeReport(); });
 
         auto uiPresetNames = uiPresetManager.getPresetNames();
         int currentUiPresetIdx = juce::jmax (0, uiPresetNames.indexOf (uiPresetManager.getLastAppliedPresetName()));
-        general.addCombo ("UI Preset", uiPresetNames, currentUiPresetIdx, [this, uiPresetNames] (int idx)
+        uiPresetCombo = &general.addCombo ("UI Preset", uiPresetNames, currentUiPresetIdx, [this, uiPresetNames] (int idx)
         {
             if (idx >= 0 && idx < uiPresetNames.size())
             {
@@ -2624,6 +2971,10 @@ private:
             }
         });
 
+        general.addButton ("Open Recordings Folder", "Where voice recordings from the Recorder get saved",
+            [this] { recFolder.revealToUser(); });
+        general.addButton ("Open Themes Folder", "mods/themes, changes in here are picked up automatically",
+            [this] { themesFolder.revealToUser(); });
         general.addButton ("Export Language Template", "Writes every piece of text vlab shows to mods/languages/_english_template.json so you can make a complete language mod",
             [this] { exportLanguageTemplate(); });
 
@@ -2688,12 +3039,41 @@ private:
             azSliderPtr->setValue (deg, juce::dontSendNotification);
         };
 
+        auto& discord = addSection ("Discord Rich Presence", "D");
+        discord.addToggle ("Show what I'm doing on Discord", discordEnabled, [this] (bool v)
+        {
+            discordEnabled = v;
+            saveDiscordPreference();
+            updateDiscordPresence();
+        });
+        discord.addToggle ("Show the soundboard name", discordShowBoard, [this] (bool v) { discordShowBoard = v; saveDiscordPreference(); });
+        discord.addToggle ("Show the name of the sound I'm playing", discordShowSound, [this] (bool v) { discordShowSound = v; saveDiscordPreference(); });
+        discord.addToggle ("Show when autotune is on", discordShowFx, [this] (bool v) { discordShowFx = v; saveDiscordPreference(); });
+        discordIdEditor.setText (discordClientId, juce::dontSendNotification);
+        discordIdEditor.setTextToShowWhenEmpty ("Discord application ID (discord.com/developers)", palette().textDim);
+        discordIdEditor.onTextChange = [this]
+        {
+            discordClientId = discordIdEditor.getText().retainCharacters ("0123456789");
+        };
+        discordIdEditor.onReturnKey = [this] { discordIdEditor.setText (discordClientId, juce::dontSendNotification); saveDiscordPreference(); };
+        discordIdEditor.onFocusLost = [this] { saveDiscordPreference(); };
+        discord.addCustomComponent (discordIdEditor, 28);
+        discordStatusLabel.setFont (juce::Font (12.0f));
+        discordStatusLabel.setColour (juce::Label::textColourId, palette().textDim);
+        discord.addCustomComponent (discordStatusLabel, 22);
+
+        auto& keybinds = addSection ("Keybinds", "K");
+        keybindPanel.provider = [this] { return collectKeybindEntries(); };
+        keybindPanel.onClearAll = [this] { confirmClearAllKeybinds(); };
+        keybinds.addCustomComponent (keybindPanel, 260);
+        keybindPanel.refresh();
+
         // ── Recorder: record the mic input straight into a soundboard slot ──
         auto& recorder = addSection ("Recorder", "R");
         juce::StringArray slotOptions;
         slotOptions.add ("Next Empty Slot");
-        for (int i = 0; i < kVisibleSlots; ++i) slotOptions.add ("Slot " + juce::String (i + 1));
-        recorder.addCombo ("Target Slot", slotOptions, 0, [this] (int idx) { recordTargetSlot = idx - 1; });
+        for (int i = 0; i < soundboard.getSlotCount(); ++i) slotOptions.add ("Slot " + juce::String (i + 1));
+        recordTargetCombo = &recorder.addCombo ("Target Slot", slotOptions, 0, [this] (int idx) { recordTargetSlot = idx - 1; });
         recordToggleBtn = &recorder.addToggle ("Recording", false, [this] (bool v) { setRecordingActive (v); });
 
         settingsContent.addAndMakeVisible (setRecordHotkeyButton);
@@ -2865,6 +3245,7 @@ private:
     {
         vlab::AudioEngine* engine = nullptr;
         int bufferSize = 0;
+        double sampleRate = vlab::kSampleRate;
 
         void paint (juce::Graphics& g) override
         {
@@ -2895,7 +3276,8 @@ private:
 
             const float cpu = engine != nullptr ? engine->cpuPercent.load() : 0.0f;
             row ("CPU Load", juce::String ((int) cpu) + "%");
-            row ("Sample Rate", juce::String ((int) vlab::kSampleRate) + " Hz");
+            row ("Sample Rate", juce::String ((int) sampleRate) + " Hz"
+                 + (std::abs (sampleRate - vlab::kSampleRate) > 1.0 ? " (device wouldn't do " + juce::String ((int) vlab::kSampleRate) + ")" : juce::String()));
             row ("Buffer Size", juce::String (bufferSize) + " samples");
             row ("Block Latency", juce::String (bufferSize / (vlab::kSampleRate / 1000.0), 1) + " ms");
         }
@@ -2938,12 +3320,344 @@ private:
         synth.allNotesOff();
         holdToneToggle.setToggleState (false, juce::dontSendNotification);
         synthParams.resetToDefaults();
+        rebuildSynthUi();
+    }
 
+    void rebuildSynthUi()
+    {
         synthSections.clear();
         pianoKeyButtons.clear();
         synthContent.removeAllChildren();
         buildSynthTab();
+        applyScrollWheelPolicy (synthContent);
+        retranslateTree (synthContent);
         layoutSynthContent (synthViewport.getWidth());
+    }
+
+    // synth
+    juce::String synthNoteName (int semitoneFromBaseC) const
+    {
+        static const char* names[] = { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" };
+        const int midi = (synthBaseOctave + 1) * 12 + semitoneFromBaseC;
+        return juce::String (names[midi % 12]) + juce::String (midi / 12 - 1);
+    }
+
+    void synthKeyDown (int semi)
+    {
+        const auto note = synthNoteName (semi).toStdString();
+        const double freq = vlab::noteNameToFreq (note);
+        synthParams.freq = (float) freq;
+        if (synthParams.arpOn.load())
+        {
+            // latch: a new chord replaces the old one
+            if (synthParams.arpLatch.load() && mouseKeysDown.empty() && computerKeysDown.empty())
+                heldArpNotes.clear();
+            addHeldArpNote (note);
+        }
+        else
+            synth.noteOn (vlab::noteToMidi (note), (float) freq);
+    }
+
+    void synthKeyUp (int semi)
+    {
+        const auto note = synthNoteName (semi).toStdString();
+        if (synthParams.arpOn.load())
+        {
+            if (! synthParams.arpLatch.load())
+                removeHeldArpNote (note);
+        }
+        else
+            synth.noteOff (vlab::noteToMidi (note));
+    }
+
+    void updateSynthOctaveLabel()
+    {
+        synthOctaveLabel.setText ("Octave " + juce::String (synthBaseOctave), juce::dontSendNotification);
+    }
+
+    void shiftSynthOctave (int delta)
+    {
+        const int next = juce::jlimit (1, 6, synthBaseOctave + delta);
+        if (next == synthBaseOctave)
+            return;
+        synth.allNotesOff();
+        heldArpNotes.clear();
+        computerKeysDown.clear();
+        mouseKeysDown.clear();
+        synthBaseOctave = next;
+        updateSynthOctaveLabel();
+    }
+
+    // computer key -> semitone, -1 if it isn't a piano key
+    static int synthSemitoneForKey (int keyCode)
+    {
+        switch (juce::CharacterFunctions::toLowerCase ((juce::juce_wchar) keyCode))
+        {
+            case 'a': return 0;   case 'w': return 1;   case 's': return 2;   case 'e': return 3;
+            case 'd': return 4;   case 'f': return 5;   case 't': return 6;   case 'g': return 7;
+            case 'y': return 8;   case 'h': return 9;   case 'u': return 10;  case 'j': return 11;
+            case 'k': return 12;  case 'o': return 13;  case 'l': return 14;  case 'p': return 15;
+            case ';': return 16;
+            default:  return -1;
+        }
+    }
+
+    bool handleSynthComputerKey (const juce::KeyPress& key)
+    {
+        if (currentTab != Tab::Synth || pendingBind != BindTarget::None)
+            return false;
+        if (key.getModifiers().isAnyModifierKeyDown())
+            return false;
+        if (dynamic_cast<juce::TextEditor*> (juce::Component::getCurrentlyFocusedComponent()) != nullptr)
+            return false;
+
+        const int c = key.getKeyCode();
+        if (c == 'z' || c == 'Z') { shiftSynthOctave (-1); return true; }
+        if (c == 'x' || c == 'X') { shiftSynthOctave (1);  return true; }
+
+        const int semi = synthSemitoneForKey (c);
+        if (semi < 0)
+            return false;
+        if (computerKeysDown.insert (c).second)
+            synthKeyDown (semi);
+        for (auto& kb : pianoKeyButtons)
+            if (kb->semitone == semi) kb->setToggleState (true, juce::dontSendNotification);
+        return true;
+    }
+
+    bool keyStateChanged (bool) override
+    {
+        if (computerKeysDown.empty())
+            return false;
+        bool handled = false;
+        for (auto it = computerKeysDown.begin(); it != computerKeysDown.end();)
+        {
+            if (! juce::KeyPress::isKeyCurrentlyDown (*it))
+            {
+                const int semi = synthSemitoneForKey (*it);
+                it = computerKeysDown.erase (it);
+                if (semi >= 0)
+                {
+                    synthKeyUp (semi);
+                    for (auto& kb : pianoKeyButtons)
+                        if (kb->semitone == semi) kb->setToggleState (false, juce::dontSendNotification);
+                }
+                handled = true;
+            }
+            else
+                ++it;
+        }
+        return handled;
+    }
+
+    juce::File synthPresetFolder() const
+    {
+        return juce::File::getCurrentWorkingDirectory().getChildFile ("synth_presets");
+    }
+
+    static juce::StringArray builtinSynthPresetNames()
+    {
+        return { "Init", "Warm Pad", "Pluck", "Fat Bass", "Lead", "Organ", "Wobble Bass", "Glass Bells", "8-Bit" };
+    }
+
+    static bool applyBuiltinSynthPreset (const juce::String& name, vlab::SynthParams& sp)
+    {
+        using W = vlab::WaveType;
+        const auto master = sp.masterVol.load();
+        sp.resetToDefaults();
+        sp.masterVol = master;
+        if (name == "Init") return true;
+        if (name == "Warm Pad")
+        {
+            sp.wave = W::SuperSaw; sp.unison = 3; sp.unisonDetune = 18.0f;
+            sp.envA = 0.8f; sp.envD = 0.6f; sp.envS = 0.8f; sp.envR = 1.6f;
+            sp.filterCutoff = 0.35f; sp.filterResonance = 0.15f;
+            sp.chorusDepth = 0.5f; sp.chorusMix = 0.4f; sp.reverbMix = 0.35f; sp.reverbDecay = 0.7f;
+        }
+        else if (name == "Pluck")
+        {
+            sp.wave = W::Saw; sp.envA = 0.002f; sp.envD = 0.25f; sp.envS = 0.0f; sp.envR = 0.2f;
+            sp.filterCutoff = 0.2f; sp.filterEnvAmount = 0.6f; sp.filterResonance = 0.3f;
+            sp.delayMix = 0.2f; sp.reverbMix = 0.15f;
+        }
+        else if (name == "Fat Bass")
+        {
+            sp.wave = W::Saw; sp.unison = 2; sp.osc2Mix = 0.6f; sp.osc2Wave = W::Square; sp.osc2Detune = -1200.0f;
+            sp.subMix = 0.5f; sp.envA = 0.005f; sp.envS = 0.9f; sp.envR = 0.15f;
+            sp.filterCutoff = 0.3f; sp.filterResonance = 0.25f; sp.drive = 0.3f;
+        }
+        else if (name == "Lead")
+        {
+            sp.wave = W::Square; sp.unison = 2; sp.unisonDetune = 8.0f; sp.portamento = 0.08f;
+            sp.envA = 0.01f; sp.envS = 0.8f; sp.envR = 0.25f; sp.filterCutoff = 0.7f;
+            sp.delayMix = 0.25f; sp.delayFeedback = 0.35f; sp.reverbMix = 0.2f;
+        }
+        else if (name == "Organ")
+        {
+            sp.wave = W::Organ; sp.envA = 0.005f; sp.envD = 0.1f; sp.envS = 1.0f; sp.envR = 0.08f;
+            sp.chorusDepth = 0.4f; sp.chorusMix = 0.35f;
+        }
+        else if (name == "Wobble Bass")
+        {
+            sp.wave = W::Saw; sp.unison = 2; sp.subMix = 0.4f; sp.filterCutoff = 0.25f; sp.filterResonance = 0.45f;
+            sp.modTarget = vlab::ModTarget::Filter; sp.modLfoRate = 3.0f; sp.modLfoDepth = 0.8f; sp.drive = 0.25f;
+        }
+        else if (name == "Glass Bells")
+        {
+            sp.wave = W::Sine; sp.fmDepth = 1.6f; sp.fmFreq = 880.0f;
+            sp.envA = 0.002f; sp.envD = 1.2f; sp.envS = 0.0f; sp.envR = 1.5f;
+            sp.reverbMix = 0.45f; sp.reverbDecay = 0.8f; sp.delayMix = 0.2f;
+        }
+        else if (name == "8-Bit")
+        {
+            sp.wave = W::Pulse; sp.envA = 0.001f; sp.envD = 0.08f; sp.envS = 0.6f; sp.envR = 0.05f; sp.fxBitcrush = 6.0f;
+        }
+        else
+            return false;
+        return true;
+    }
+
+    static juce::var synthParamsToVar (const vlab::SynthParams& p)
+    {
+        auto* o = new juce::DynamicObject();
+        auto f = [&o] (const char* k, float v) { o->setProperty (k, (double) v); };
+        auto i = [&o] (const char* k, int v) { o->setProperty (k, v); };
+        i ("wave", (int) p.wave.load());         i ("unison", p.unison.load());         f ("unisonDetune", p.unisonDetune.load());
+        f ("detune", p.detune.load());           f ("portamento", p.portamento.load());
+        f ("fmDepth", p.fmDepth.load());         f ("fmFreq", p.fmFreq.load());
+        f ("osc2Mix", p.osc2Mix.load());         f ("osc2Detune", p.osc2Detune.load()); i ("osc2Wave", (int) p.osc2Wave.load());
+        f ("subMix", p.subMix.load());           f ("noiseMix", p.noiseMix.load());
+        f ("envA", p.envA.load()); f ("envD", p.envD.load()); f ("envS", p.envS.load()); f ("envR", p.envR.load());
+        f ("velocitySensitivity", p.velocitySensitivity.load());
+        i ("filterType", (int) p.filterType.load()); f ("filterCutoff", p.filterCutoff.load());
+        f ("filterResonance", p.filterResonance.load()); f ("filterEnvAmount", p.filterEnvAmount.load());
+        i ("modTarget", (int) p.modTarget.load()); i ("modLfoShape", (int) p.modLfoShape.load());
+        f ("modLfoRate", p.modLfoRate.load()); f ("modLfoDepth", p.modLfoDepth.load());
+        f ("drive", p.drive.load()); f ("fxDist", p.fxDist.load()); f ("fxBitcrush", p.fxBitcrush.load());
+        f ("chorusRate", p.chorusRate.load()); f ("chorusDepth", p.chorusDepth.load()); f ("chorusMix", p.chorusMix.load());
+        f ("delayTimeMs", p.delayTimeMs.load()); f ("delayFeedback", p.delayFeedback.load()); f ("delayMix", p.delayMix.load());
+        f ("reverbMix", p.reverbMix.load()); f ("reverbDecay", p.reverbDecay.load());
+        f ("modPan", p.modPan.load()); f ("masterVol", p.masterVol.load());
+        return juce::var (o);
+    }
+
+    static void synthParamsFromVar (const juce::var& v, vlab::SynthParams& p)
+    {
+        if (! v.isObject())
+            return;
+        auto f = [&v] (const char* k, std::atomic<float>& dst) { if (v.hasProperty (k)) dst = (float) (double) v[k]; };
+        auto i = [&v] (const char* k, std::atomic<int>& dst) { if (v.hasProperty (k)) dst = (int) v[k]; };
+        if (v.hasProperty ("wave"))        p.wave = (vlab::WaveType) juce::jlimit (0, 7, (int) v["wave"]);
+        if (v.hasProperty ("osc2Wave"))    p.osc2Wave = (vlab::WaveType) juce::jlimit (0, 7, (int) v["osc2Wave"]);
+        if (v.hasProperty ("filterType"))  p.filterType = (vlab::FilterType) juce::jlimit (0, 3, (int) v["filterType"]);
+        if (v.hasProperty ("modTarget"))   p.modTarget = (vlab::ModTarget) juce::jlimit (0, 4, (int) v["modTarget"]);
+        if (v.hasProperty ("modLfoShape")) p.modLfoShape = (vlab::LfoShape) juce::jlimit (0, 3, (int) v["modLfoShape"]);
+        i ("unison", p.unison); f ("unisonDetune", p.unisonDetune); f ("detune", p.detune); f ("portamento", p.portamento);
+        f ("fmDepth", p.fmDepth); f ("fmFreq", p.fmFreq);
+        f ("osc2Mix", p.osc2Mix); f ("osc2Detune", p.osc2Detune); f ("subMix", p.subMix); f ("noiseMix", p.noiseMix);
+        f ("envA", p.envA); f ("envD", p.envD); f ("envS", p.envS); f ("envR", p.envR);
+        f ("velocitySensitivity", p.velocitySensitivity);
+        f ("filterCutoff", p.filterCutoff); f ("filterResonance", p.filterResonance); f ("filterEnvAmount", p.filterEnvAmount);
+        f ("modLfoRate", p.modLfoRate); f ("modLfoDepth", p.modLfoDepth);
+        f ("drive", p.drive); f ("fxDist", p.fxDist); f ("fxBitcrush", p.fxBitcrush);
+        f ("chorusRate", p.chorusRate); f ("chorusDepth", p.chorusDepth); f ("chorusMix", p.chorusMix);
+        f ("delayTimeMs", p.delayTimeMs); f ("delayFeedback", p.delayFeedback); f ("delayMix", p.delayMix);
+        f ("reverbMix", p.reverbMix); f ("reverbDecay", p.reverbDecay);
+        f ("modPan", p.modPan); f ("masterVol", p.masterVol);
+    }
+
+    void refreshSynthPresetBox()
+    {
+        synthPresetBox.clear (juce::dontSendNotification);
+        int id = 1;
+        for (auto& n : builtinSynthPresetNames())
+            synthPresetBox.addItem (n, id++);
+        auto files = synthPresetFolder().findChildFiles (juce::File::findFiles, false, "*.json");
+        files.sort();
+        if (! files.isEmpty())
+            synthPresetBox.addSeparator();
+        for (auto& f : files)
+            synthPresetBox.addItem (f.getFileNameWithoutExtension(), id++);
+        synthPresetBox.setTextWhenNothingSelected ("Presets...");
+    }
+
+    void loadSynthPresetByName (const juce::String& name)
+    {
+        if (name.isEmpty())
+            return;
+        synth.allNotesOff();
+        heldArpNotes.clear();
+        if (! applyBuiltinSynthPreset (name, synthParams))
+        {
+            const auto f = synthPresetFolder().getChildFile (name + ".json");
+            if (! f.existsAsFile())
+                return;
+            const auto master = synthParams.masterVol.load();
+            synthParams.resetToDefaults();
+            synthParams.masterVol = master;
+            synthParamsFromVar (juce::JSON::parse (f), synthParams);
+        }
+        rebuildSynthUi();
+        synthPresetBox.setText (name, juce::dontSendNotification);
+    }
+
+    void promptSaveSynthPreset()
+    {
+        auto* aw = new juce::AlertWindow ("Save synth preset", "Name for this patch:", juce::AlertWindow::NoIcon);
+        aw->addTextEditor ("name", "My Patch");
+        aw->addButton ("Save", 1, juce::KeyPress (juce::KeyPress::returnKey));
+        aw->addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+        aw->enterModalState (true, juce::ModalCallbackFunction::create ([this, aw] (int result)
+        {
+            std::unique_ptr<juce::AlertWindow> owner (aw);
+            if (result != 1)
+                return;
+            const auto name = juce::File::createLegalFileName (aw->getTextEditorContents ("name").trim());
+            if (name.isEmpty())
+                return;
+            synthPresetFolder().createDirectory();
+            synthPresetFolder().getChildFile (name + ".json").replaceWithText (juce::JSON::toString (synthParamsToVar (synthParams)));
+            refreshSynthPresetBox();
+            synthPresetBox.setText (name, juce::dontSendNotification);
+        }), false);
+    }
+
+    void randomizeSynthPatch()
+    {
+        auto& sp = synthParams;
+        auto& r = arpRng;
+        auto uni = [&r] (float lo, float hi) { return lo + (hi - lo) * std::uniform_real_distribution<float> (0.0f, 1.0f) (r); };
+        auto pick = [&r] (int n) { return (int) (r() % (unsigned) n); };
+
+        synth.allNotesOff();
+        const auto master = sp.masterVol.load();
+        sp.resetToDefaults();
+        sp.masterVol = master;
+        sp.wave = (vlab::WaveType) pick (8);
+        sp.unison = 1 + pick (4);
+        sp.unisonDetune = uni (4.0f, 25.0f);
+        sp.osc2Mix = pick (2) ? uni (0.2f, 0.7f) : 0.0f;
+        sp.osc2Wave = (vlab::WaveType) pick (8);
+        sp.osc2Detune = (float) (pick (5) - 2) * 700.0f / 2.0f;
+        sp.subMix = pick (3) == 0 ? uni (0.2f, 0.6f) : 0.0f;
+        sp.envA = uni (0.002f, 0.6f);
+        sp.envD = uni (0.05f, 1.0f);
+        sp.envS = uni (0.2f, 1.0f);
+        sp.envR = uni (0.05f, 1.5f);
+        sp.filterType = (vlab::FilterType) (pick (4) == 0 ? pick (4) : 0);
+        sp.filterCutoff = uni (0.15f, 1.0f);
+        sp.filterResonance = uni (0.0f, 0.5f);
+        sp.filterEnvAmount = uni (-0.3f, 0.7f);
+        if (pick (3) == 0)
+        {
+            sp.modTarget = (vlab::ModTarget) (1 + pick (4));
+            sp.modLfoShape = (vlab::LfoShape) pick (4);
+            sp.modLfoRate = uni (0.5f, 8.0f);
+            sp.modLfoDepth = uni (0.1f, 0.6f);
+        }
+        sp.chorusDepth = uni (0.2f, 0.7f); sp.chorusMix = pick (2) ? uni (0.1f, 0.5f) : 0.0f;
+        sp.delayMix = pick (2) ? uni (0.1f, 0.35f) : 0.0f;
+        sp.reverbMix = pick (2) ? uni (0.1f, 0.4f) : 0.0f;
     }
 
     // ── build: Synth tab ─────────────────────────────────────────────────
@@ -2961,57 +3675,59 @@ private:
         };
 
         auto& osc1 = addSection ("Oscillator 1", "O");
-        osc1.addCombo ("Waveform", { "Sine", "Square", "Saw", "Triangle", "Pulse", "SuperSaw", "Organ", "Wavefolder" }, 0,
+        osc1.addCombo ("Waveform", { "Sine", "Square", "Saw", "Triangle", "Pulse", "SuperSaw", "Organ", "Wavefolder" }, (int) sp.wave.load(),
             [&sp] (int idx) { sp.wave = (vlab::WaveType) idx; });
-        osc1.addSlider ("Unison Voices", 1.0, 7.0, 1.0, [&sp] (double v) { sp.unison = (int) v; }, 0);
-        osc1.addSlider ("Unison Detune (cents)", 0.0, 50.0, 10.0, [&sp] (double v) { sp.unisonDetune = (float) v; }, 0);
-        osc1.addSlider ("Detune (cents)", -100.0, 100.0, 0.0, [&sp] (double v) { sp.detune = (float) v; }, 0);
-        osc1.addSlider ("Portamento (s)", 0.0, 1.0, 0.0, [&sp] (double v) { sp.portamento = (float) v; }, 2);
+        osc1.addSlider ("Unison Voices", 1.0, 7.0, (double) sp.unison.load(), [&sp] (double v) { sp.unison = (int) v; }, 0);
+        osc1.addSlider ("Unison Detune (cents)", 0.0, 50.0, (double) sp.unisonDetune.load(), [&sp] (double v) { sp.unisonDetune = (float) v; }, 0);
+        osc1.addSlider ("Detune (cents)", -100.0, 100.0, (double) sp.detune.load(), [&sp] (double v) { sp.detune = (float) v; }, 0);
+        osc1.addSlider ("Portamento (s)", 0.0, 1.0, (double) sp.portamento.load(), [&sp] (double v) { sp.portamento = (float) v; }, 2);
 
         auto& osc2 = addSection ("Oscillator 2 / Sub / Noise", "S");
-        osc2.addSlider ("OSC2 Mix", 0.0, 1.0, 0.0, [&sp] (double v) { sp.osc2Mix = (float) v; });
-        osc2.addSlider ("OSC2 Detune (cents)", -1200.0, 1200.0, 700.0, [&sp] (double v) { sp.osc2Detune = (float) v; }, 0);
-        osc2.addCombo ("OSC2 Waveform", { "Sine", "Square", "Saw", "Triangle", "Pulse", "SuperSaw", "Organ", "Wavefolder" }, 2,
+        osc2.addSlider ("OSC2 Mix", 0.0, 1.0, (double) sp.osc2Mix.load(), [&sp] (double v) { sp.osc2Mix = (float) v; });
+        osc2.addSlider ("OSC2 Detune (cents)", -1200.0, 1200.0, (double) sp.osc2Detune.load(), [&sp] (double v) { sp.osc2Detune = (float) v; }, 0);
+        osc2.addCombo ("OSC2 Waveform", { "Sine", "Square", "Saw", "Triangle", "Pulse", "SuperSaw", "Organ", "Wavefolder" }, (int) sp.osc2Wave.load(),
             [&sp] (int idx) { sp.osc2Wave = (vlab::WaveType) idx; });
-        osc2.addSlider ("Sub Oscillator Mix", 0.0, 1.0, 0.0, [&sp] (double v) { sp.subMix = (float) v; });
-        osc2.addSlider ("Noise Mix", 0.0, 1.0, 0.0, [&sp] (double v) { sp.noiseMix = (float) v; });
+        osc2.addSlider ("Sub Oscillator Mix", 0.0, 1.0, (double) sp.subMix.load(), [&sp] (double v) { sp.subMix = (float) v; });
+        osc2.addSlider ("Noise Mix", 0.0, 1.0, (double) sp.noiseMix.load(), [&sp] (double v) { sp.noiseMix = (float) v; });
 
         auto& fm = addSection ("FM", "F");
-        fm.addSlider ("FM Depth", 0.0, 5.0, 0.0, [&sp] (double v) { sp.fmDepth = (float) v; }, 2);
-        fm.addSlider ("FM Frequency (Hz)", 1.0, 2000.0, 440.0, [&sp] (double v) { sp.fmFreq = (float) v; }, 0);
+        fm.addSlider ("FM Depth", 0.0, 5.0, (double) sp.fmDepth.load(), [&sp] (double v) { sp.fmDepth = (float) v; }, 2);
+        fm.addSlider ("FM Frequency (Hz)", 1.0, 2000.0, (double) sp.fmFreq.load(), [&sp] (double v) { sp.fmFreq = (float) v; }, 0);
 
         auto& env = addSection ("Envelope (ADSR)", "E");
-        env.addSlider ("Attack (s)", 0.001, 3.0, 0.05, [&sp] (double v) { sp.envA = (float) v; }, 3);
-        env.addSlider ("Decay (s)", 0.001, 3.0, 0.2, [&sp] (double v) { sp.envD = (float) v; }, 3);
-        env.addSlider ("Sustain", 0.0, 1.0, 0.7, [&sp] (double v) { sp.envS = (float) v; });
-        env.addSlider ("Release (s)", 0.001, 5.0, 0.3, [&sp] (double v) { sp.envR = (float) v; }, 3);
-        env.addSlider ("Velocity Sensitivity", 0.0, 1.0, 0.0, [&sp] (double v) { sp.velocitySensitivity = (float) v; });
+        env.addSlider ("Attack (s)", 0.001, 3.0, (double) sp.envA.load(), [&sp] (double v) { sp.envA = (float) v; }, 3);
+        env.addSlider ("Decay (s)", 0.001, 3.0, (double) sp.envD.load(), [&sp] (double v) { sp.envD = (float) v; }, 3);
+        env.addSlider ("Sustain", 0.0, 1.0, (double) sp.envS.load(), [&sp] (double v) { sp.envS = (float) v; });
+        env.addSlider ("Release (s)", 0.001, 5.0, (double) sp.envR.load(), [&sp] (double v) { sp.envR = (float) v; }, 3);
+        env.addSlider ("Velocity Sensitivity", 0.0, 1.0, (double) sp.velocitySensitivity.load(), [&sp] (double v) { sp.velocitySensitivity = (float) v; });
 
         auto& filt = addSection ("Filter & Modulation", "M");
-        filt.addCombo ("Filter Type", { "Low-Pass", "High-Pass", "Band-Pass", "Notch" }, 0,
+        filt.addCombo ("Filter Type", { "Low-Pass", "High-Pass", "Band-Pass", "Notch" }, (int) sp.filterType.load(),
             [&sp] (int idx) { sp.filterType = (vlab::FilterType) idx; });
-        filt.addSlider ("Filter Cutoff", 0.01, 1.0, 1.0, [&sp] (double v) { sp.filterCutoff = (float) v; }, 2);
-        filt.addSlider ("Filter Resonance", 0.0, 1.0, 0.0, [&sp] (double v) { sp.filterResonance = (float) v; });
-        filt.addSlider ("Filter Envelope Amount", -1.0, 1.0, 0.0, [&sp] (double v) { sp.filterEnvAmount = (float) v; });
-        filt.addCombo ("Mod LFO Target", { "None", "Pitch", "Amplitude", "Filter", "OSC2 Mix" }, 0,
+        filt.addSlider ("Filter Cutoff", 0.01, 1.0, (double) sp.filterCutoff.load(), [&sp] (double v) { sp.filterCutoff = (float) v; }, 2);
+        filt.addSlider ("Filter Resonance", 0.0, 1.0, (double) sp.filterResonance.load(), [&sp] (double v) { sp.filterResonance = (float) v; });
+        filt.addSlider ("Filter Envelope Amount", -1.0, 1.0, (double) sp.filterEnvAmount.load(), [&sp] (double v) { sp.filterEnvAmount = (float) v; });
+        filt.addCombo ("Mod LFO Target", { "None", "Pitch", "Amplitude", "Filter", "OSC2 Mix" }, (int) sp.modTarget.load(),
             [&sp] (int idx) { sp.modTarget = (vlab::ModTarget) idx; });
-        filt.addCombo ("Mod LFO Shape", { "Sine", "Triangle", "Square", "Sample & Hold" }, 0,
+        filt.addCombo ("Mod LFO Shape", { "Sine", "Triangle", "Square", "Sample & Hold" }, (int) sp.modLfoShape.load(),
             [&sp] (int idx) { sp.modLfoShape = (vlab::LfoShape) idx; });
-        filt.addSlider ("Mod LFO Rate (Hz)", 0.05, 20.0, 5.0, [&sp] (double v) { sp.modLfoRate = (float) v; }, 2);
-        filt.addSlider ("Mod LFO Depth", 0.0, 1.0, 0.0, [&sp] (double v) { sp.modLfoDepth = (float) v; });
+        filt.addSlider ("Mod LFO Rate (Hz)", 0.05, 20.0, (double) sp.modLfoRate.load(), [&sp] (double v) { sp.modLfoRate = (float) v; }, 2);
+        filt.addSlider ("Mod LFO Depth", 0.0, 1.0, (double) sp.modLfoDepth.load(), [&sp] (double v) { sp.modLfoDepth = (float) v; });
 
         auto& fx = addSection ("Synth FX & Output", "X");
-        fx.addSlider ("Drive", 0.0, 1.0, 0.0, [&sp] (double v) { sp.drive = (float) v; });
-        fx.addSlider ("Distortion", 0.0, 1.0, 0.0, [&sp] (double v) { sp.fxDist = (float) v; });
-        fx.addSlider ("Bitcrush (bits)", 0.0, 16.0, 0.0, [&sp] (double v) { sp.fxBitcrush = (float) v; }, 0);
-        fx.addSlider ("Chorus Rate (Hz)", 0.05, 5.0, 0.8, [&sp] (double v) { sp.chorusRate = (float) v; }, 2);
-        fx.addSlider ("Chorus Depth", 0.0, 1.0, 0.0, [&sp] (double v) { sp.chorusDepth = (float) v; });
-        fx.addSlider ("Chorus Mix", 0.0, 1.0, 0.0, [&sp] (double v) { sp.chorusMix = (float) v; });
-        fx.addSlider ("Delay Time (ms)", 10.0, 1500.0, 280.0, [&sp] (double v) { sp.delayTimeMs = (float) v; }, 0);
-        fx.addSlider ("Delay Feedback", 0.0, 0.95, 0.3, [&sp] (double v) { sp.delayFeedback = (float) v; });
-        fx.addSlider ("Delay Mix", 0.0, 1.0, 0.0, [&sp] (double v) { sp.delayMix = (float) v; });
-        fx.addSlider ("Pan", -1.0, 1.0, 0.0, [&sp] (double v) { sp.modPan = (float) v; });
-        fx.addSlider ("Master Volume", 0.0, 1.0, 0.5, [&sp] (double v) { sp.masterVol = (float) v; });
+        fx.addSlider ("Drive", 0.0, 1.0, (double) sp.drive.load(), [&sp] (double v) { sp.drive = (float) v; });
+        fx.addSlider ("Distortion", 0.0, 1.0, (double) sp.fxDist.load(), [&sp] (double v) { sp.fxDist = (float) v; });
+        fx.addSlider ("Bitcrush (bits)", 0.0, 16.0, (double) sp.fxBitcrush.load(), [&sp] (double v) { sp.fxBitcrush = (float) v; }, 0);
+        fx.addSlider ("Chorus Rate (Hz)", 0.05, 5.0, (double) sp.chorusRate.load(), [&sp] (double v) { sp.chorusRate = (float) v; }, 2);
+        fx.addSlider ("Chorus Depth", 0.0, 1.0, (double) sp.chorusDepth.load(), [&sp] (double v) { sp.chorusDepth = (float) v; });
+        fx.addSlider ("Chorus Mix", 0.0, 1.0, (double) sp.chorusMix.load(), [&sp] (double v) { sp.chorusMix = (float) v; });
+        fx.addSlider ("Delay Time (ms)", 10.0, 1500.0, (double) sp.delayTimeMs.load(), [&sp] (double v) { sp.delayTimeMs = (float) v; }, 0);
+        fx.addSlider ("Delay Feedback", 0.0, 0.95, (double) sp.delayFeedback.load(), [&sp] (double v) { sp.delayFeedback = (float) v; });
+        fx.addSlider ("Delay Mix", 0.0, 1.0, (double) sp.delayMix.load(), [&sp] (double v) { sp.delayMix = (float) v; });
+        fx.addSlider ("Reverb Mix", 0.0, 1.0, (double) sp.reverbMix.load(), [&sp] (double v) { sp.reverbMix = (float) v; });
+        fx.addSlider ("Reverb Decay", 0.1, 0.95, (double) sp.reverbDecay.load(), [&sp] (double v) { sp.reverbDecay = (float) v; });
+        fx.addSlider ("Pan", -1.0, 1.0, (double) sp.modPan.load(), [&sp] (double v) { sp.modPan = (float) v; });
+        fx.addSlider ("Master Volume", 0.0, 1.0, (double) sp.masterVol.load(), [&sp] (double v) { sp.masterVol = (float) v; });
 
         auto& arp = addSection ("Arpeggiator / Song", "A");
         arp.addToggle ("Arp On", false, [this, &sp] (bool v)
@@ -3025,7 +3741,16 @@ private:
                 synth.noteOff();
             }
         });
-        arp.addSlider ("Arp BPM", 40.0, 300.0, 120.0, [&sp] (double v) { sp.arpBpm = (float) v; }, 0);
+        arp.addToggle ("Arp Latch (keys keep playing after release)", sp.arpLatch.load(), [this, &sp] (bool v)
+        {
+            sp.arpLatch = v;
+            if (! v && mouseKeysDown.empty() && computerKeysDown.empty())
+            {
+                heldArpNotes.clear();
+                rebuildArpSong();
+            }
+        });
+        arp.addSlider ("Arp BPM", 40.0, 300.0, (double) sp.arpBpm.load(), [&sp] (double v) { sp.arpBpm = (float) v; }, 0);
         arp.addCombo ("Arp Pattern", { "Up", "Down", "Up / Down", "Random" }, 0, [this, &sp] (int idx)
         {
             sp.arpPattern = (vlab::ArpPattern) juce::jlimit (0, 3, idx);
@@ -3089,37 +3814,38 @@ private:
         synthResetButton.onClick = [this] { resetSynthPatch(); };
 
         synthContent.addAndMakeVisible (keyboardLabel);
-        keyboardLabel.setText ("Play: click and hold a key (hold several + Arp On for a chord)", juce::dontSendNotification);
+        keyboardLabel.setText ("Play: click keys, or use the computer keyboard (A W S E D F T G Y H U J K O L P ; ). Z / X change octave. Hold several + Arp On for a chord.", juce::dontSendNotification);
         keyboardLabel.setFont (juce::Font (12.0f));
         keyboardLabel.setColour (juce::Label::textColourId, palette().textDim);
 
-        static const std::vector<std::pair<juce::String, bool>> notes = {
-            { "C4", false }, { "C#4", true }, { "D4", false }, { "D#4", true }, { "E4", false },
-            { "F4", false }, { "F#4", true }, { "G4", false }, { "G#4", true }, { "A4", false },
-            { "A#4", true }, { "B4", false }, { "C5", false }
-        };
-        for (auto& [note, black] : notes)
+        static const bool blackPattern[12] = { false, true, false, true, false, false, true, false, true, false, true, false };
+        for (int semi = 0; semi <= 24; ++semi)
         {
             auto kb = std::make_unique<PianoKeyButton>();
-            kb->isBlack = black;
-            kb->onPress = [this, note = note]
-            {
-                synthParams.freq = (float) vlab::noteNameToFreq (note.toStdString());
-                if (synthParams.arpOn.load())
-                    addHeldArpNote (note.toStdString());
-                else
-                    synth.noteOn (vlab::noteToMidi (note.toStdString()), (float) vlab::noteNameToFreq (note.toStdString()));
-            };
-            kb->onRelease = [this, note = note]
-            {
-                if (synthParams.arpOn.load())
-                    removeHeldArpNote (note.toStdString());
-                else
-                    synth.noteOff (vlab::noteToMidi (note.toStdString()));
-            };
+            kb->isBlack = blackPattern[semi % 12];
+            kb->semitone = semi;
+            kb->onPress = [this, semi] { synthKeyDown (semi); mouseKeysDown.insert (semi); };
+            kb->onRelease = [this, semi] { mouseKeysDown.erase (semi); synthKeyUp (semi); };
             synthContent.addAndMakeVisible (*kb);
             pianoKeyButtons.push_back (std::move (kb));
         }
+
+        synthContent.addAndMakeVisible (synthOctaveLabel);
+        synthOctaveLabel.setJustificationType (juce::Justification::centred);
+        synthOctaveLabel.setFont (juce::Font (12.0f));
+        synthContent.addAndMakeVisible (synthOctDownButton);
+        synthContent.addAndMakeVisible (synthOctUpButton);
+        synthOctDownButton.onClick = [this] { shiftSynthOctave (-1); };
+        synthOctUpButton.onClick = [this] { shiftSynthOctave (1); };
+        updateSynthOctaveLabel();
+
+        synthContent.addAndMakeVisible (synthPresetBox);
+        synthContent.addAndMakeVisible (synthSavePresetButton);
+        synthContent.addAndMakeVisible (synthRandomButton);
+        refreshSynthPresetBox();
+        synthPresetBox.onChange = [this] { loadSynthPresetByName (synthPresetBox.getText()); };
+        synthSavePresetButton.onClick = [this] { promptSaveSynthPreset(); };
+        synthRandomButton.onClick = [this] { randomizeSynthPatch(); rebuildSynthUi(); };
 
         synthContent.addAndMakeVisible (toneLabel);
         toneLabel.setText ("Or hold a single tone at any frequency:", juce::dontSendNotification);
@@ -3461,7 +4187,6 @@ private:
             autotuneReadout.setText (text, juce::dontSendNotification);
     }
 
-    // The viewport belonging to the tab that's on screen (null for App Mod full-view canvases, which handle their own wheel).
     juce::Viewport* getActiveViewport()
     {
         switch (currentTab)
@@ -3478,9 +4203,7 @@ private:
         return nullptr;
     }
 
-    // v1.9.6: "Mouse wheel adjusts sliders" setting. With it off, sliders and drop-downs pass the wheel up to the page
-    // so scrolling never gets "caught" on a control. FxSection applies it to everything it creates; this pass covers
-    // every other slider/combo in the window (board volume/speed, sidebar, Theme Creator, ...).
+    // FxSection does its own controls, this is for the rest
     static void applyScrollWheelPolicy (juce::Component& root)
     {
         const bool on = FxSection::sliderWheelEnabled;
@@ -3502,10 +4225,8 @@ private:
         saveStore.commit ("sliderWheel");
     }
 
-    // ── language mods: translate any literal English text ───────────────────
-    // Plain labels and buttons keep their English source text in a component property, so switching language (or back
-    // to English) always starts from the original wording, while text the app changes later (a status line, "Stop
-    // Engine", ...) is picked up as the new English source instead of being overwritten with a stale translation.
+    // language mods
+    // the english text is stashed on the component so switching language doesn't stack translations
     void translateOneComponent (juce::Component& c)
     {
         auto retext = [this, &c] (const juce::String& current, const std::function<void (const juce::String&)>& setter)
@@ -3556,7 +4277,7 @@ private:
             const auto t = text.trim();
             if (t.length() < 2 || ! t.containsAnyOf ("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"))
                 return;
-            if (t.containsAnyOf ("0123456789%\n")) // live readouts ("CPU 12%", device names), not fixed UI text
+            if (t.containsAnyOf ("0123456789%\n")) // skip live readouts
                 return;
             out.addIfNotAlreadyThere (t);
         };
@@ -3592,7 +4313,6 @@ private:
 
     void exportLanguageTemplate()
     {
-        // Run once in English first so the labels/buttons hold their original wording while we read them.
         const auto activeLanguage = translationManager.getLastAppliedLanguageName();
         translationManager.applyLanguage ("English");
         applyTranslations();
@@ -3608,9 +4328,9 @@ private:
 
         auto* strings = new juce::DynamicObject();
         for (auto& kv : translationManager.getDefaultKeyStrings())
-            strings->setProperty (juce::Identifier (kv.first), kv.second); // the original fixed keys
+            strings->setProperty (juce::Identifier (kv.first), kv.second);
         for (auto& t : found)
-            strings->setProperty (juce::Identifier (t), t); // every English string: edit the right-hand side
+            strings->setProperty (juce::Identifier (t), t);
         auto* root = new juce::DynamicObject();
         root->setProperty ("name", "My Language");
         root->setProperty ("_how_to_use", "Rename this file to something.lang.json and put it in mods/languages. Change the text on the "
@@ -3667,11 +4387,84 @@ private:
         speakButton.setButtonText (tr.t ("speak"));
         stopTtsButton.setButtonText (tr.t ("stopTts"));
 
-        // v1.9.6: then everything else, by literal English text (see TranslationManager::text())
         retranslateTree (*this);
         refreshRouteControls();
         resized();
         repaint();
+    }
+
+    void repaintEverythingForTheme()
+    {
+        rgbEngine.refreshBase();
+        repaint();
+        for (auto* c : { (juce::Component*) &boardContent, &fxRackContent, &settingsContent,
+                          &visualizerContent, &synthContent, &modsContent, &themeCreatorContent })
+            c->repaint();
+    }
+
+    bool applyUiPresetByName (const juce::String& name)
+    {
+        if (! uiPresetManager.getPresetNames().contains (name))
+            return false;
+        uiPresetManager.applyPreset (name);
+        uiPresetManager.savePreference (uiPresetPrefFile);
+        saveStore.commit ("uiPreset");
+        if (uiPresetCombo != nullptr)
+            uiPresetCombo->setText (name, juce::dontSendNotification);
+        return true;
+    }
+
+    bool applyThemeByName (const juce::String& name)
+    {
+        if (! themeManager.applyTheme (name))
+            return false;
+        themeManager.savePreference (themePrefFile);
+        saveStore.commit ("theme");
+        if (themeCanSetUiPreset)
+        {
+            const auto wanted = themeManager.getThemeInfo (name).uiPreset;
+            if (wanted.isNotEmpty())
+                applyUiPresetByName (wanted);
+        }
+        if (themeCombo != nullptr)
+            themeCombo->setText (name, juce::dontSendNotification);
+        repaintEverythingForTheme();
+        return true;
+    }
+
+    void refreshThemeCombo()
+    {
+        if (themeCombo == nullptr)
+            return;
+        const auto names = themeManager.getThemeNames();
+        themeCombo->clear (juce::dontSendNotification);
+        for (int i = 0; i < names.size(); ++i)
+            themeCombo->addItem (names[i], i + 1);
+        themeCombo->setText (themeManager.getLastAppliedThemeName(), juce::dontSendNotification);
+    }
+
+    // pick up edits to mods/themes
+    void pollThemeFolder()
+    {
+        if (! themeManager.folderChanged (themesFolder))
+            return;
+        const auto active = themeManager.getLastAppliedThemeName();
+        themeManager.reloadThemeMods (themesFolder);
+        if (! themeManager.applyTheme (active))
+            themeManager.applyTheme ("Default Green");
+        refreshThemeCombo();
+        repaintEverythingForTheme();
+    }
+
+    void showThemeReport()
+    {
+        themeManager.reloadThemeMods (themesFolder);
+        const auto& report = themeManager.getLoadReport();
+        juce::AlertWindow::showMessageBoxAsync (report.isEmpty() ? juce::AlertWindow::InfoIcon : juce::AlertWindow::WarningIcon,
+            "Theme check",
+            report.isEmpty() ? juce::String ("Every theme in mods/themes loaded cleanly.")
+                             : report.joinIntoString ("\n"));
+        refreshThemeCombo();
     }
 
     void reapplyThemeAndMod()
@@ -3912,21 +4705,18 @@ private:
         reloadSongsButton.setBounds (16, y, juce::jmin (width - 32, 160), 24);
         y += 34;
 
+        synthPresetBox.setBounds (16, y, juce::jmin (width - 32, 220), 26);
+        synthSavePresetButton.setBounds (16 + 228, y, 100, 26);
+        synthRandomButton.setBounds (16 + 336, y, 100, 26);
+        y += 36;
+
         keyboardLabel.setBounds (16, y, width - 32, 18);
         y += 22;
-        const int keyAreaWidth = width - 32;
-        const int whiteKeyW = keyAreaWidth / 7;
-        int whiteX = 16;
-        for (auto& kb : pianoKeyButtons)
-            if (! kb->isBlack) { kb->setBounds (whiteX, y, whiteKeyW - 2, 90); whiteX += whiteKeyW; }
-        whiteX = 16;
-        int whiteIdx = 0;
-        for (auto& kb : pianoKeyButtons)
-        {
-            if (! kb->isBlack) { ++whiteIdx; continue; }
-            kb->setBounds (16 + whiteIdx * whiteKeyW - whiteKeyW / 4, y, whiteKeyW / 2, 55);
-            kb->toFront (false);
-        }
+        synthOctDownButton.setBounds (16, y, 64, 24);
+        synthOctaveLabel.setBounds (84, y, 100, 24);
+        synthOctUpButton.setBounds (188, y, 64, 24);
+        y += 30;
+        placePianoKeys (16, y, width - 32, 90, 55);
         y += 110;
 
         toneLabel.setBounds (16, y, width - 32, 18);
@@ -4216,7 +5006,10 @@ private:
 
     void placePianoKeys (int x0, int y, int totalWidth, int whiteHeight, int blackHeight)
     {
-        const int whiteKeyW = totalWidth / 7;
+        int numWhite = 0;
+        for (auto& kb : pianoKeyButtons)
+            if (! kb->isBlack) ++numWhite;
+        const int whiteKeyW = totalWidth / juce::jmax (1, numWhite);
         int whiteX = x0;
         for (auto& kb : pianoKeyButtons)
             if (! kb->isBlack) { kb->setBounds (whiteX, y, whiteKeyW - 2, whiteHeight); whiteX += whiteKeyW; }
@@ -4245,8 +5038,21 @@ private:
         reloadSongsButton.setBounds (transport);
         y += 38;
 
+        juce::Rectangle<int> presetRow (0, y, width, 28);
+        synthRandomButton.setBounds (presetRow.removeFromRight (100));
+        presetRow.removeFromRight (8);
+        synthSavePresetButton.setBounds (presetRow.removeFromRight (100));
+        presetRow.removeFromRight (8);
+        synthPresetBox.setBounds (presetRow.removeFromLeft (juce::jlimit (160, 320, width / 2)));
+        y += 38;
+
         keyboardLabel.setBounds (0, y, width, 16);
         y += 18;
+        juce::Rectangle<int> octRow (0, y, width, 24);
+        synthOctDownButton.setBounds (octRow.removeFromLeft (64));
+        synthOctaveLabel.setBounds (octRow.removeFromLeft (100));
+        synthOctUpButton.setBounds (octRow.removeFromLeft (64));
+        y += 30;
         placePianoKeys (0, y, width, 78, 48);
         y += 86;
 
@@ -4291,6 +5097,8 @@ private:
         int x = 0, y = 0, col = 0;
         for (auto& c : cards)
         {
+            if (! c->isVisible())
+                continue;
             c->setBounds (x, y, cardW, cardH);
             ++col; x += cardW + 14;
             if (col >= cols) { col = 0; x = 0; y += cardH + 14; }
@@ -4298,9 +5106,8 @@ private:
         boardContent.setSize (width, y + (col > 0 ? cardH + 14 : 0));
     }
 
-    // v1.9.6: always re-lay the FX rack out from the VIEWPORT width. The old collapse/expand callbacks passed
-    // fxRackContent.getWidth(), but layoutFxRackModern() shrinks that by the scrollbar gutter (width -= 14)
-    // before sizing the content, so every collapse/expand fed it back in and the rack got 14px narrower each time.
+    // layoutFxRackModern takes 14 off whatever width it gets, so give it the viewport's width and not the
+    // content's, otherwise the rack gets 14px narrower every time a section collapses
     void relayoutFxRack()
     {
         const int w = fxRackViewport.getWidth() > 0 ? fxRackViewport.getWidth()
@@ -4501,7 +5308,7 @@ private:
         boardDeleteRouteButton.setVisible (tab == Tab::Board);
         if (tabEchoPanel_ != nullptr)
         {
-            tabEchoPanel_->setVisible (tab == Tab::Board);
+            tabEchoPanel_->setVisible (kShowTabEcho && tab == Tab::Board);
             if (tab == Tab::Board) tabEchoPanel_->syncFromState();
         }
         fxRackViewport.setVisible (tab == Tab::FxRack);
@@ -4520,7 +5327,7 @@ private:
         synthTabButton.setToggleState (tab == Tab::Synth, juce::dontSendNotification);
         themeCreatorTabButton.setToggleState (tab == Tab::ThemeCreator, juce::dontSendNotification);
         ttsTabButton.setToggleState (tab == Tab::Tts, juce::dontSendNotification);
-        applyScrollWheelPolicy (*this); // cheap, and catches anything a rebuild created since the last tab switch
+        applyScrollWheelPolicy (*this);
 
         importButton.setVisible (tab == Tab::Board);
         searchBox.setVisible (! modernUi || tab == Tab::Board);
@@ -4559,12 +5366,13 @@ private:
 
     void filterBoard (const juce::String& query)
     {
-        for (int i = 0; i < kVisibleSlots; ++i)
+        for (int i = 0; i < (int) cards.size() && i < soundboard.getSlotCount(); ++i)
         {
             const auto& name = soundboard.getSlots()[(size_t) i].name;
             const bool matches = query.isEmpty() || juce::String (name).containsIgnoreCase (query);
             cards[(size_t) i]->setVisible (matches);
         }
+        layoutBoardContent (boardViewport.getWidth());
     }
 
     void loadIntoSlot (int idx)
@@ -4575,7 +5383,10 @@ private:
             {
                 auto f = fc.getResult();
                 if (f.existsAsFile() && soundboard.loadFile (idx, f.getFullPathName()))
+                {
+                    syncCards();
                     cards[(size_t) idx]->refreshFromSlot();
+                }
             });
     }
 
@@ -4608,10 +5419,10 @@ private:
                 {
                     if (! f.existsAsFile())
                         continue;
-                    while (nextSlot < kVisibleSlots && soundboard.getSlots()[(size_t) nextSlot].data != nullptr)
+                    while (nextSlot < soundboard.getSlotCount() && soundboard.getSlots()[(size_t) nextSlot].data != nullptr)
                         ++nextSlot;
-                    if (nextSlot >= kVisibleSlots)
-                        break;
+                    soundboard.ensureSlotCount (nextSlot + 1);
+                    syncCards();
                     if (soundboard.loadFile (nextSlot, f.getFullPathName(), false)) // save once at the end, below
                     {
                         cards[(size_t) nextSlot]->refreshFromSlot();
@@ -4624,10 +5435,11 @@ private:
                     soundboard.onSaveConfigRequested();
                 filterBoard (searchBox.getText());
 
+                syncCards();
                 if (loaded < files.size())
                     juce::AlertWindow::showMessageBoxAsync (juce::AlertWindow::WarningIcon, "Import Sounds",
                         "Loaded " + juce::String (loaded) + " of " + juce::String (files.size())
-                            + " files, ran out of empty slots on this board.");
+                            + " files, the rest couldn't be read as audio.");
             });
     }
 
@@ -4682,8 +5494,8 @@ private:
                 int loaded = 0;
                 for (auto& f : audioFiles)
                 {
-                    if (loaded >= kVisibleSlots)
-                        break;
+                    soundboard.ensureSlotCount (loaded + 1);
+                    syncCards();
                     if (soundboard.loadFile (loaded, f.getFullPathName(), false)) // save once at the end, below
                     {
                         cards[(size_t) loaded]->refreshFromSlot();
@@ -4691,6 +5503,7 @@ private:
                     }
                 }
 
+                syncCards();
                 if (soundboard.onSaveConfigRequested) soundboard.onSaveConfigRequested();
                 filterBoard (""); // clear any leftover search filter so all the new sounds are visible
                 boardSelectorBar.refresh (soundboard);
