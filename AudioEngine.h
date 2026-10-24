@@ -11,6 +11,7 @@
 #include "DSP/GlitchFx.h"
 #include "DSP/VanillaFx.h"
 #include "DSP/AutoTune.h"
+#include "DSP/VoiceIsolation.h"
 #include "SoundboardRoutes.h"
 #include "AudioEngineParams.h"
 #include <deque>
@@ -24,11 +25,10 @@ namespace vlab
         AudioEngineParams params;
         std::atomic<bool> monitoring { false };
 
-        // v1.9.6: where in the voice chain the soundboard is mixed in (a vlab::SoundboardInjectPoint). Default is the
-        // original behaviour: after the voice FX. Deliberately NOT part of `params`, so "Reset All FX" and FX
-        // presets never silently re-route the soundboard.
+        // Kept out of params so Reset All FX and presets don't change the route.
         std::atomic<int> sbInjectPoint { kSbAfterExperimental };
-        dsp::AutoTune autoTune; // readouts (detected/target note) are atomics inside it, for the UI
+        dsp::AutoTune autoTune;
+        dsp::VoiceIsolation voiceIsolation;
 
         std::function<void (vlab::AudioBuffer&, int)> soundboardTtsMix;   // sb.get_audio_mix(include_sb=False, include_tts=True)
         std::function<void (vlab::AudioBuffer&, int)> soundboardMix;      // sb.get_audio_mix(include_sb=True,  include_tts=False)
@@ -40,8 +40,13 @@ namespace vlab
 
         void prepare (double sampleRateIn, int blockSize)
         {
-            juce::ignoreUnused (sampleRateIn, blockSize); // engine is fixed at vlab::kSampleRate, same as the Python (SR=44100)
+            juce::ignoreUnused (blockSize);
             cbTimes.clear();
+            // these two need the real rate, the rest of the chain still assumes 44.1k
+            deviceRate = sampleRateIn > 0.0 ? sampleRateIn : vlab::kSampleRate;
+            autoTune.prepare (deviceRate);
+            voiceIsolation.prepare (deviceRate);
+            isolationPrepared = true;
         }
 
         void process (const vlab::AudioBuffer& in, vlab::AudioBuffer& out, int numSamples)
@@ -55,23 +60,36 @@ namespace vlab
                 out.copyFrom (1, 0, out, 0, 0, numSamples);
             }
 
-            // ── noise gate ──────────────────────────────────────────────
-            const float gate = params.noiseGate.load();
-            if (gate > 0.0f)
+            // voice isolation
+            if (params.voiceIsolationEnabled.load())
             {
-                for (int ch = 0; ch < 2; ++ch)
+                if (! isolationPrepared) { voiceIsolation.prepare (deviceRate); isolationPrepared = true; }
+                if (! isolationWasOn) { voiceIsolation.reset(); isolationWasOn = true; }
+                dsp::VoiceIsolation::Settings vi;
+                vi.strength = params.voiceIsolationStrength.load();
+                vi.reduceDb = params.voiceIsolationReduceDb.load();
+                vi.sensitivity = params.voiceIsolationSensitivity.load();
+                constexpr int kIsoChunk = 1024;
+                float mono[kIsoChunk];
+                auto* l = out.getWritePointer (0);
+                auto* r = out.getWritePointer (1);
+                for (int base = 0; base < numSamples; base += kIsoChunk)
                 {
-                    auto* d = out.getWritePointer (ch);
-                    for (int i = 0; i < numSamples; ++i)
-                    {
-                        const float amp = std::abs (d[i]);
-                        if (amp < gate)
-                            d[i] *= amp / std::max (gate, 1e-9f);
-                    }
+                    const int n = std::min (kIsoChunk, numSamples - base);
+                    for (int i = 0; i < n; ++i)
+                        mono[i] = 0.5f * (l[base + i] + r[base + i]);
+                    voiceIsolation.process (mono, n, vi);
+                    for (int i = 0; i < n; ++i)
+                        l[base + i] = r[base + i] = mono[i];
                 }
             }
+            else if (isolationWasOn)
+            {
+                isolationWasOn = false;
+                voiceIsolation.reset();
+            }
 
-            // ── autotune (mic only, so it runs before anything else is mixed in) ──
+            // autotune
             if (params.autotuneEnabled.load())
             {
                 if (! autotuneWasOn) { autoTune.reset(); autotuneWasOn = true; }
@@ -101,9 +119,7 @@ namespace vlab
                 autoTune.reset();
             }
 
-            // ── soundboard injection (see SoundboardRoutes.h) ──────────
-            // The soundboard has to be pulled exactly once per block, so the route is read once and the mix happens
-            // at whichever stage boundary below matches it.
+            // soundboard injection, see SoundboardRoutes.h
             const int sbPoint = juce::jlimit (0, (int) kSbNumPoints - 1, sbInjectPoint.load());
             auto injectSoundboard = [&] (int point)
             {
@@ -227,7 +243,7 @@ namespace vlab
                 params.expRadioSweepEnabled.load(), params.expRadioSweepRate.load(), params.expRadioSweepAmount.load(),
                 params.expPumpEnabled.load(), params.expPumpRate.load(), params.expPumpDepth.load());
 
-            // ── soundboard mix, Route 1 (with its own send-reverb, see injectSoundboard above) ──
+            // soundboard, route 1
             injectSoundboard (kSbAfterExperimental);
 
             if (browserAudioMix)
@@ -299,8 +315,9 @@ namespace vlab
 
     private:
         dsp::Reverb reverb;
-        dsp::Reverb sbSendReverb; // v1.9.6: the soundboard's send reverb used to share state with the master reverb above
-        bool autotuneWasOn = false;
+        dsp::Reverb sbSendReverb;
+        bool autotuneWasOn = false, isolationWasOn = false, isolationPrepared = false;
+        double deviceRate = vlab::kSampleRate;
         dsp::Chorus chorus;
         dsp::Delay delayFx;
         dsp::Phaser phaser;
