@@ -7,13 +7,19 @@
 #include <array>
 #include <mutex>
 #include <atomic>
+#include <deque>
 #include <map>
 #include <set>
 #include <functional>
 
 namespace vlab
 {
-    constexpr int kSoundLimit = 100; // SOUND_LIMIT
+    // boards start with this many slots and grow from there
+    constexpr int kMinSlots = 100;
+    constexpr int kSlotSanityCap = 100000; // just so a broken config can't ask for millions
+
+    // deque, so pointers to slots stay valid when the board grows (this can sometimes crash)
+    using SlotList = std::deque<SoundSlot>;
 
     struct BoardMeta
     {
@@ -28,12 +34,6 @@ namespace vlab
         {
             formatManager.registerBasicFormats();
             ensureAtLeastOneBoard();
-        }
-
-        ~SoundboardCore()
-        {
-            ++loadGeneration;
-            loaderPool.removeAllJobs (true, 15000);
         }
 
         // ---- multi-board management --------------------------------------------
@@ -61,7 +61,7 @@ namespace vlab
             BoardMeta meta;
             meta.name = name.empty() ? ("Soundboard " + std::to_string (boards.size() + 1)) : name;
             boards.push_back (meta);
-            boardData.emplace_back (kSoundLimit);
+            boardData.emplace_back (kMinSlots);
             return (int) boards.size() - 1;
         }
 
@@ -92,11 +92,6 @@ namespace vlab
                 activeBoard = idx;
                 slots = boardData[(size_t) activeBoard];
             }
-            {
-                std::lock_guard<std::mutex> lock (mutex);
-                if (totalDecodedBytesLocked() > kMaxTotalDecodedBytes / 2)
-                    evictInactiveBoardsLocked();
-            }
             loadActiveBoardAudio(); // no-op for any slot already loaded from a previous visit
         }
 
@@ -106,109 +101,40 @@ namespace vlab
             {
                 BoardMeta meta; meta.name = "Soundboard 1";
                 boards.push_back (meta);
-                boardData.emplace_back (kSoundLimit);
+                boardData.emplace_back (kMinSlots);
                 activeBoard = 0;
             }
             activeBoard = juce::jlimit (0, (int) boards.size() - 1, activeBoard);
             slots = boardData[(size_t) activeBoard];
         }
 
-        // Boards load lazily: switching to a board (or starting up) only queues a background job
-        // that decodes its sounds one by one. Anything played before its turn is decoded on demand.
         void loadActiveBoardAudio()
         {
-            const int generation = ++loadGeneration;
-            int board;
+            for (int i = 0; i < (int) slots.size(); ++i)
             {
-                std::lock_guard<std::mutex> lock (mutex);
-                board = activeBoard;
-            }
-            loaderPool.addJob ([this, generation, board] { backgroundLoadBoard (generation, board); });
-        }
-
-        void backgroundLoadBoard (int generation, int board)
-        {
-            auto cancelled = [&]
-            {
-                if (generation != loadGeneration.load())
-                    return true;
-                std::lock_guard<std::mutex> lock (mutex);
-                return activeBoard != board;
-            };
-
-            const int numSlots = (int) kSoundLimit;
-            for (int i = 0; i < numSlots; ++i)
-            {
-                if (cancelled())
-                    return;
-
                 juce::String path;
-                size_t remaining = 0;
                 {
                     std::lock_guard<std::mutex> lock (mutex);
-                    if (i >= (int) slots.size() || slots[(size_t) i].data != nullptr || slots[(size_t) i].path.empty())
+                    if (slots[(size_t) i].data != nullptr || slots[(size_t) i].path.empty())
                         continue;
                     path = juce::String (slots[(size_t) i].path);
-                    const auto total = totalDecodedBytesLocked();
-                    remaining = total >= kMaxTotalDecodedBytes ? 0 : kMaxTotalDecodedBytes - total;
                 }
 
                 juce::File f (path);
                 if (! f.existsAsFile())
                     continue;
-                if (remaining == 0)
-                {
-                    ++skippedForMemory; // stays unloaded, ensureSlotLoaded() brings it in when it's played
-                    continue;
-                }
-
-                auto stereo = dsp::loadAudioFileAsStereo (f, formatManager, std::min (remaining, kMaxFileDecodedBytes));
+                auto stereo = dsp::loadAudioFileAsStereo (f, formatManager);
                 if (stereo == nullptr)
-                {
-                    ++skippedForMemory;
                     continue;
-                }
 
                 std::lock_guard<std::mutex> lock (mutex);
-                if (activeBoard == board && generation == loadGeneration.load()
-                    && i < (int) slots.size() && slots[(size_t) i].data == nullptr
-                    && slots[(size_t) i].path == path.toStdString())
+                if (i < (int) slots.size())
                     slots[(size_t) i].data = stereo;
             }
 
             std::lock_guard<std::mutex> lock (mutex);
-            if (activeBoard == board && generation == loadGeneration.load() && board < (int) boardData.size())
-                boardData[(size_t) board] = slots;
-        }
-
-        int takeSkippedForMemoryCount() { return skippedForMemory.exchange (0); }
-
-        void ensureSlotLoaded (int idx)
-        {
-            juce::String path;
-            size_t remaining = 0;
-            {
-                std::lock_guard<std::mutex> lock (mutex);
-                if (idx < 0 || idx >= (int) slots.size()) return;
-                auto& s = slots[(size_t) idx];
-                if (s.data != nullptr || s.path.empty()) return;
-                path = juce::String (s.path);
-                if (totalDecodedBytesLocked() >= kMaxTotalDecodedBytes / 5 * 4)
-                    evictInactiveBoardsLocked();
-                const auto total = totalDecodedBytesLocked();
-                remaining = total >= kMaxTotalDecodedBytes ? 0 : kMaxTotalDecodedBytes - total;
-            }
-
-            juce::File f (path);
-            if (remaining == 0 || ! f.existsAsFile())
-                return;
-            auto stereo = dsp::loadAudioFileAsStereo (f, formatManager, std::min (remaining, kMaxFileDecodedBytes));
-            if (stereo == nullptr)
-                return;
-
-            std::lock_guard<std::mutex> lock (mutex);
-            if (idx < (int) slots.size() && slots[(size_t) idx].data == nullptr && slots[(size_t) idx].path == path.toStdString())
-                slots[(size_t) idx].data = stereo;
+            if (activeBoard >= 0 && activeBoard < (int) boardData.size())
+                boardData[(size_t) activeBoard] = slots;
         }
 
         // ---- persistence -----------------------------------------------------
@@ -243,7 +169,7 @@ namespace vlab
                         meta.name = "Soundboard " + std::to_string (boards.size() + 1);
                     meta.iconPath = bObj->getProperty ("icon").toString().toStdString();
 
-                    std::vector<SoundSlot> boardSlots (kSoundLimit);
+                    SlotList boardSlots (kMinSlots);
                     loadSlotsIntoBoard (bObj->getProperty ("slots"), boardSlots);
 
                     boards.push_back (meta);
@@ -254,7 +180,7 @@ namespace vlab
             else
             {
                 BoardMeta meta; meta.name = "Soundboard 1";
-                std::vector<SoundSlot> legacySlots (kSoundLimit);
+                SlotList legacySlots (kMinSlots);
                 loadSlotsIntoBoard (parsed, legacySlots);
                 boards.push_back (meta);
                 boardData.push_back (std::move (legacySlots));
@@ -321,14 +247,12 @@ namespace vlab
                                              [&] (const SoundSlot& s) { return s.path == full; });
                 if (already) continue;
 
+                int target = -1;
                 for (int i = 0; i < (int) slots.size(); ++i)
-                {
-                    if (slots[(size_t) i].path.empty() && slots[(size_t) i].data == nullptr)
-                    {
-                        loadFile (i, f.getFullPathName(), false);
-                        break;
-                    }
-                }
+                    if (slots[(size_t) i].data == nullptr) { target = i; break; }
+                if (target < 0)
+                    target = (int) slots.size();
+                loadFile (target, f.getFullPathName(), false);
             }
         }
 
@@ -355,15 +279,17 @@ namespace vlab
 
         // ---- file loading ------------------------------------------------------
 
-        bool loadFileInto (std::vector<SoundSlot>& target, int idx, const juce::String& filepath)
+        bool loadFileInto (SlotList& target, int idx, const juce::String& filepath)
         {
-            if (idx < 0 || idx >= (int) target.size())
+            if (idx < 0 || idx >= kSlotSanityCap)
                 return false;
+            if (idx >= (int) target.size())
+                target.resize ((size_t) idx + 1);
             juce::File f (filepath);
             if (! f.existsAsFile())
                 return false;
 
-            auto stereo = dsp::loadAudioFileAsStereo (f, formatManager, kMaxFileDecodedBytes);
+            auto stereo = dsp::loadAudioFileAsStereo (f, formatManager);
             if (stereo == nullptr)
                 return false;
 
@@ -386,7 +312,7 @@ namespace vlab
             return ok;
         }
 
-        void loadSlotsIntoBoard (const juce::var& slotsVar, std::vector<SoundSlot>& target)
+        void loadSlotsIntoBoard (const juce::var& slotsVar, SlotList& target)
         {
             if (! slotsVar.isObject())
                 return;
@@ -397,8 +323,10 @@ namespace vlab
             for (auto& prop : obj->getProperties())
             {
                 const int idx = prop.name.toString().getIntValue();
-                if (idx < 0 || idx >= (int) target.size() || ! prop.value.isObject())
+                if (idx < 0 || idx >= kSlotSanityCap || ! prop.value.isObject())
                     continue;
+                if (idx >= (int) target.size())
+                    target.resize ((size_t) idx + 1);
                 auto* v = prop.value.getDynamicObject();
                 auto& slot = target[(size_t) idx];
 
@@ -461,9 +389,11 @@ namespace vlab
         }
 
         // ---- playback control ---------------------------------------------------
+        // kSampleRate / real device rate. Sounds are stored at kSampleRate, so on a 48k device they'd play fast
+        void setDeviceRateRatio (double ratio) { deviceRateRatio.store (juce::jlimit (0.25, 4.0, ratio)); }
+
         void play (int idx, float speed, float vol, bool loop, bool reverse)
         {
-            ensureSlotLoaded (idx);
             std::lock_guard<std::mutex> lock (mutex);
             if (idx < 0 || idx >= (int) slots.size()) return;
             auto& s = slots[(size_t) idx];
@@ -623,7 +553,7 @@ namespace vlab
                 auto& s = *sp;
                 if (s.data == nullptr) continue;
                 const int dataLen = s.data->getNumSamples();
-                const int needed = (int) (frameSize * s.speed);
+                const int needed = (int) std::lround (frameSize * (double) s.speed * deviceRateRatio.load());
                 if (needed <= 0) continue;
 
                 vlab::AudioBuffer chunk (2, needed);
@@ -717,52 +647,80 @@ namespace vlab
             }
         }
 
-        std::vector<SoundSlot>& getSlots() { return slots; }
+        SlotList& getSlots() { return slots; }
+
+        int getSlotCount() const { return (int) slots.size(); }
+
+        struct HotkeyEntry { int board; int slot; std::string slotName; std::string hotkey; };
+
+        std::vector<HotkeyEntry> collectHotkeys()
+        {
+            std::lock_guard<std::mutex> lock (mutex);
+            std::vector<HotkeyEntry> out;
+            for (int b = 0; b < (int) boardData.size(); ++b)
+            {
+                const SlotList& list = (b == activeBoard) ? slots : boardData[(size_t) b];
+                for (int i = 0; i < (int) list.size(); ++i)
+                    if (! list[(size_t) i].hotkey.empty())
+                        out.push_back ({ b, i, list[(size_t) i].name, list[(size_t) i].hotkey });
+            }
+            return out;
+        }
+
+        void clearHotkey (int board, int slot)
+        {
+            std::lock_guard<std::mutex> lock (mutex);
+            if (board < 0 || board >= (int) boardData.size())
+                return;
+            SlotList& list = (board == activeBoard) ? slots : boardData[(size_t) board];
+            if (slot >= 0 && slot < (int) list.size())
+                list[(size_t) slot].hotkey.clear();
+        }
+
+        int clearAllHotkeys()
+        {
+            std::lock_guard<std::mutex> lock (mutex);
+            int n = 0;
+            for (auto& s : slots)     if (! s.hotkey.empty()) { s.hotkey.clear(); ++n; }
+            for (size_t b = 0; b < boardData.size(); ++b)
+                if ((int) b != activeBoard)
+                    for (auto& s : boardData[b]) if (! s.hotkey.empty()) { s.hotkey.clear(); ++n; }
+            return n;
+        }
+
+        void ensureSlotCount (int n)
+        {
+            std::lock_guard<std::mutex> lock (mutex);
+            if (n > (int) slots.size() && n <= kSlotSanityCap)
+                slots.resize ((size_t) n);
+        }
+
+        // keep a few empty slots past the last used one
+        void padSlots()
+        {
+            std::lock_guard<std::mutex> lock (mutex);
+            int last = -1;
+            for (int i = (int) slots.size() - 1; i >= 0; --i)
+                if (! slots[(size_t) i].path.empty() || slots[(size_t) i].data != nullptr) { last = i; break; }
+            const int want = std::max (kMinSlots, ((last + 1 + 10 + 9) / 10) * 10);
+            if (want > (int) slots.size() && want <= kSlotSanityCap)
+                slots.resize ((size_t) want);
+        }
         std::mutex& getMutex() { return mutex; }
 
         std::function<void (int, const std::string&)> onHotkeyRegistered;
         std::function<void()> onSaveConfigRequested;
 
     private:
-        std::vector<SoundSlot> slots; // the currently-active board's slots, what play()/loadFile()/etc all operate on
+        SlotList slots; // the currently-active board's slots, what play()/loadFile()/etc all operate on
 
         std::vector<BoardMeta> boards;                    // one entry per board, parallel to boardData
-        std::vector<std::vector<SoundSlot>> boardData;    // per-board slot storage; boardData[activeBoard] is stale until synced (see setActiveBoard/saveConfig)
+        std::vector<SlotList> boardData;    // per-board slot storage; boardData[activeBoard] is stale until synced (see setActiveBoard/saveConfig)
         int activeBoard = 0;
         std::vector<ActiveSound> activeSounds;
         std::vector<ActiveSound> ttsQueue;
-        static constexpr size_t kMaxTotalDecodedBytes = (size_t) 1536 * 1024 * 1024;
-        static constexpr size_t kMaxFileDecodedBytes  = (size_t) 512 * 1024 * 1024;
-        std::atomic<int> skippedForMemory { 0 };
-        std::atomic<int> loadGeneration { 0 };
-
-        static size_t decodedBytesOf (const std::vector<SoundSlot>& v)
-        {
-            size_t total = 0;
-            for (auto& slot : v)
-                if (slot.data != nullptr)
-                    total += (size_t) slot.data->getNumSamples() * 2 * sizeof (float);
-            return total;
-        }
-
-        size_t totalDecodedBytesLocked() const
-        {
-            size_t total = decodedBytesOf (slots);
-            for (size_t b = 0; b < boardData.size(); ++b)
-                if ((int) b != activeBoard)
-                    total += decodedBytesOf (boardData[b]);
-            return total;
-        }
-
-        void evictInactiveBoardsLocked()
-        {
-            for (size_t b = 0; b < boardData.size(); ++b)
-                if ((int) b != activeBoard)
-                    for (auto& slot : boardData[b])
-                        slot.data = nullptr;
-        }
-
         std::mutex mutex;
+        std::atomic<double> deviceRateRatio { 1.0 };
         juce::AudioFormatManager formatManager;
 
         std::vector<vlab::AudioBuffer> recBuffer;
@@ -820,7 +778,5 @@ namespace vlab
             return out;
         }
 
-
-        juce::ThreadPool loaderPool { 1 };
     };
 }
