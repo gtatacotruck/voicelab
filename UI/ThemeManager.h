@@ -2,7 +2,9 @@
 #include "LookAndFeel.h"
 #include <juce_core/juce_core.h>
 #include <map>
-
+#include <functional>
+#include <vector>
+// DO NOT CONFUSE THIS FOR THEME EDITOR PLS DO NOT EDIT THIS THIS IS NOT THEME EDITOR
 namespace vlab::ui
 {
     class ThemeManager
@@ -117,35 +119,99 @@ namespace vlab::ui
             builtins["Domino's"] = dominos;
         }
 
+        struct ThemeInfo
+        {
+            juce::String name, author, description, version;
+            juce::String uiPreset;
+            bool builtIn = false;
+        };
+
+        // problems don't stop a theme loading, they end up in getLoadReport()
         void scanThemeMods (const juce::File& folder)
         {
+            report.clear();
             if (! folder.isDirectory())
                 return;
+
+            struct Raw { juce::File file; juce::var data; juce::String name; };
+            std::vector<Raw> raws;
             for (auto& f : folder.findChildFiles (juce::File::findFiles, false, "*.theme.json"))
             {
                 auto parsed = juce::JSON::parse (f);
                 if (! parsed.isObject())
-                    continue;
-                Palette p; // start from default, override what's present
-                auto get = [&parsed] (const char* key, juce::Colour fallback)
                 {
-                    auto v = parsed.getProperty (key, juce::var());
-                    if (! v.isString())
+                    report.add (f.getFileName() + ": not valid JSON, skipped");
+                    continue;
+                }
+                raws.push_back ({ f, parsed, parsed.getProperty ("name", f.getFileNameWithoutExtension().replace (".theme", "")).toString() });
+            }
+
+            std::map<std::string, const Raw*> byName;
+            for (auto& r : raws)
+                byName[r.name.toStdString()] = &r;
+
+            // resolve "extends" (built in or another mod), up to 8 levels
+            std::function<bool (const Raw&, Palette&, int)> build = [&] (const Raw& r, Palette& out, int depth) -> bool
+            {
+                if (depth > 8)
+                {
+                    report.add (r.file.getFileName() + ": \"extends\" chain is too deep (or loops)");
+                    return false;
+                }
+
+                Palette base;
+                const auto parent = r.data.getProperty ("extends", juce::String()).toString();
+                const bool hasParent = parent.isNotEmpty();
+                if (hasParent)
+                {
+                    auto bi = builtins.find (parent.toStdString());
+                    auto mi = byName.find (parent.toStdString());
+                    if (bi != builtins.end())
+                        base = bi->second;
+                    else if (mi != byName.end() && mi->second != &r)
+                        build (*mi->second, base, depth + 1);
+                    else
+                        report.add (r.file.getFileName() + ": \"extends\" theme \"" + parent + "\" wasn't found, using the default");
+                }
+
+                auto* obj = r.data.getDynamicObject();
+                auto has = [&] (const char* key) { return obj != nullptr && obj->hasProperty (key); };
+                auto get = [&] (const char* key, juce::Colour fallback)
+                {
+                    if (! has (key))
                         return fallback;
-
-                    auto hex = v.toString().trim();
-                    if (hex.startsWithChar ('#')) hex = hex.substring (1);
-                    if (hex.length() == 6) hex = "ff" + hex; // assume opaque
-                    if (hex.length() != 8) return fallback;
-
-                    return juce::Colour::fromString (hex);
+                    juce::Colour c;
+                    if (parseColour (obj->getProperty (key), c))
+                        return c;
+                    report.add (r.file.getFileName() + ": \"" + juce::String (key) + "\" isn't a colour I understand, ignored");
+                    return fallback;
                 };
-                p.bg = get ("bg", p.bg); p.panel = get ("panel", p.panel);
-                p.panelAlt = get ("panelAlt", p.panelAlt); p.stroke = get ("stroke", p.stroke);
-                p.accent = get ("accent", p.accent); p.accentDim = get ("accentDim", p.accentDim);
-                p.accentGlow = get ("accentGlow", p.accentGlow); p.text = get ("text", p.text);
-                p.textDim = get ("textDim", p.textDim); p.danger = get ("danger", p.danger);
-                p.accent2 = get ("accent2", p.accent);
+
+                Palette p = base;
+                p.bg = get ("bg", p.bg);
+                p.text = get ("text", p.text);
+                p.accent = get ("accent", p.accent);
+                p.panel = get ("panel", p.panel);
+                p.panelAlt = get ("panelAlt", p.panelAlt);
+                p.stroke = get ("stroke", p.stroke);
+                p.accentDim = get ("accentDim", p.accentDim);
+                p.accentGlow = get ("accentGlow", p.accentGlow);
+                p.textDim = get ("textDim", p.textDim);
+                p.danger = get ("danger", p.danger);
+
+                // fill in what the theme left out from what it gave (not when it extends something)
+                if (! hasParent)
+                {
+                    if (has ("bg") && ! has ("panel"))      p.panel    = p.bg.interpolatedWith (p.text, 0.05f);
+                    if (has ("bg") && ! has ("panelAlt"))   p.panelAlt = p.bg.interpolatedWith (p.text, 0.09f);
+                    if (has ("bg") && ! has ("stroke"))     p.stroke   = p.bg.interpolatedWith (p.text, 0.17f);
+                    if (has ("text") && ! has ("textDim"))  p.textDim  = p.text.interpolatedWith (p.bg, 0.45f);
+                    if (has ("accent") && ! has ("accentDim"))  p.accentDim  = p.accent.interpolatedWith (p.bg, 0.45f);
+                    if (has ("accent") && ! has ("accentGlow")) p.accentGlow = p.accent.withAlpha (0.33f);
+                }
+                p.accent2 = has ("accent2") ? get ("accent2", p.accent) : (hasParent ? base.accent2 : p.accent);
+                if (hasParent && ! has ("accent2") && base.accent2 == base.accent)
+                    p.accent2 = p.accent;
 
                 p.textHover = get ("textHover", p.textHover);
                 p.buttonHover = get ("buttonHover", p.buttonHover);
@@ -158,23 +224,118 @@ namespace vlab::ui
                 p.linkColour = get ("linkColour", p.linkColour);
                 p.focusRing = get ("focusRing", p.focusRing);
 
-                p.cursorStyle = parsed.getProperty ("cursorStyle", p.cursorStyle).toString();
-                p.cursorImage = parsed.getProperty ("cursorImage", p.cursorImage).toString();
-                p.cursorHotspotX = (float) (double) parsed.getProperty ("cursorHotspotX", (double) p.cursorHotspotX);
-                p.cursorHotspotY = (float) (double) parsed.getProperty ("cursorHotspotY", (double) p.cursorHotspotY);
-                p.cursorSize = (int) parsed.getProperty ("cursorSize", p.cursorSize);
+                p.cursorStyle = r.data.getProperty ("cursorStyle", p.cursorStyle).toString();
+                p.cursorImage = r.data.getProperty ("cursorImage", p.cursorImage).toString();
+                p.cursorHotspotX = juce::jlimit (0.0f, 1.0f, (float) (double) r.data.getProperty ("cursorHotspotX", (double) p.cursorHotspotX));
+                p.cursorHotspotY = juce::jlimit (0.0f, 1.0f, (float) (double) r.data.getProperty ("cursorHotspotY", (double) p.cursorHotspotY));
+                p.cursorSize = juce::jlimit (8, 128, (int) r.data.getProperty ("cursorSize", p.cursorSize));
 
-                const juce::String name = parsed.getProperty ("name", f.getFileNameWithoutExtension()).toString();
-                loadedThemes[name.toStdString()] = p;
+                out = p;
+                return true;
+            };
 
-                juce::MessageManager::getInstance()->runDispatchLoopUntil (2);
+            static const char* knownKeys[] = {
+                "schema", "name", "author", "description", "version", "extends", "uiPreset",
+                "bg", "panel", "panelAlt", "stroke", "accent", "accentDim", "accentGlow", "text", "textDim", "danger", "accent2",
+                "textHover", "buttonHover", "sliderTrack", "sliderThumb", "scrollbarThumb", "tooltipBg", "tooltipText",
+                "selectionBg", "linkColour", "focusRing", "cursorStyle", "cursorImage", "cursorHotspotX", "cursorHotspotY", "cursorSize" };
+
+            for (auto& r : raws)
+            {
+                Palette p;
+                if (! build (r, p, 0))
+                    continue;
+
+                if (auto* obj = r.data.getDynamicObject())
+                    for (auto& prop : obj->getProperties())
+                    {
+                        bool known = false;
+                        for (auto* k : knownKeys)
+                            if (prop.name.toString() == k) { known = true; break; }
+                        if (! known)
+                            report.add (r.file.getFileName() + ": unknown key \"" + prop.name.toString() + "\" (ignored)");
+                    }
+
+                ThemeInfo info;
+                info.name = r.name;
+                info.author = r.data.getProperty ("author", juce::String()).toString();
+                info.description = r.data.getProperty ("description", juce::String()).toString();
+                info.version = r.data.getProperty ("version", juce::String()).toString();
+                info.uiPreset = r.data.getProperty ("uiPreset", juce::String()).toString();
+
+                loadedThemes[r.name.toStdString()] = p;
+                infos[r.name.toStdString()] = info;
+                themeFiles[r.name.toStdString()] = r.file;
             }
+            lastFolderStamp = folderStamp (folder);
         }
+
+        // formats: #rgb #rrggbb #aarrggbb rgb() rgba() or a colour name. 8 digit hex has alpha first.
+        static bool parseColour (const juce::var& v, juce::Colour& out)
+        {
+            if (! v.isString())
+                return false;
+            auto text = v.toString().trim();
+            if (text.isEmpty())
+                return false;
+
+            if (text.startsWithIgnoreCase ("rgb"))
+            {
+                auto inside = text.fromFirstOccurrenceOf ("(", false, false).upToLastOccurrenceOf (")", false, false);
+                juce::StringArray parts;
+                parts.addTokens (inside, ",", "");
+                if (parts.size() < 3)
+                    return false;
+                auto ch = [&parts] (int i) { return (juce::uint8) juce::jlimit (0, 255, parts[i].trim().getIntValue()); };
+                const float a = parts.size() >= 4 ? juce::jlimit (0.0f, 1.0f, parts[3].trim().getFloatValue()) : 1.0f;
+                out = juce::Colour (ch (0), ch (1), ch (2), a);
+                return true;
+            }
+
+            auto hex = text.startsWithChar ('#') ? text.substring (1) : text;
+            if (hex.containsOnly ("0123456789abcdefABCDEF"))
+            {
+                if (hex.length() == 3)
+                    hex = juce::String::charToString (hex[0]) + hex[0] + hex[1] + hex[1] + hex[2] + hex[2];
+                if (hex.length() == 6)
+                    hex = "ff" + hex; // 6 digits would come out fully transparent
+                if (hex.length() == 8)
+                {
+                    out = juce::Colour::fromString (hex);
+                    return true;
+                }
+                return false;
+            }
+
+            const auto named = juce::Colours::findColourForName (text, juce::Colour (0x00000000));
+            if (named.getAlpha() == 0)
+                return false;
+            out = named;
+            return true;
+        }
+
+        const juce::StringArray& getLoadReport() const { return report; }
+
+        ThemeInfo getThemeInfo (const juce::String& name) const
+        {
+            auto it = infos.find (name.toStdString());
+            if (it != infos.end())
+                return it->second;
+            ThemeInfo info;
+            info.name = name;
+            info.builtIn = isBuiltIn (name);
+            return info;
+        }
+
+        // something in the folder changed since the last scan
+        bool folderChanged (const juce::File& folder) const { return folderStamp (folder) != lastFolderStamp; }
 
         // Reload all theme mods from disk
         void reloadThemeMods (const juce::File& folder)
         {
             loadedThemes.clear();
+            infos.clear();
+            themeFiles.clear();
             scanThemeMods (folder);
         }
 
@@ -182,7 +343,10 @@ namespace vlab::ui
         {
             juce::StringArray names;
             for (auto& kv : builtins) names.add (kv.first);
-            for (auto& kv : loadedThemes) names.add (kv.first);
+            juce::StringArray modNames;
+            for (auto& kv : loadedThemes) modNames.add (kv.first);
+            modNames.sort (true);
+            names.addArray (modNames);
             return names;
         }
 
@@ -229,7 +393,16 @@ namespace vlab::ui
             auto file = folder.getChildFile (safeName + ".theme.json");
 
             auto obj = std::make_unique<juce::DynamicObject>();
+            obj->setProperty ("schema", 2);
             obj->setProperty ("name", name);
+            auto existing = infos.find (name.toStdString());
+            if (existing != infos.end())
+            {
+                if (existing->second.author.isNotEmpty())      obj->setProperty ("author", existing->second.author);
+                if (existing->second.description.isNotEmpty()) obj->setProperty ("description", existing->second.description);
+                if (existing->second.version.isNotEmpty())     obj->setProperty ("version", existing->second.version);
+                if (existing->second.uiPreset.isNotEmpty())    obj->setProperty ("uiPreset", existing->second.uiPreset);
+            }
             auto hex = [] (juce::Colour c) { return "#" + c.toDisplayString (true).toLowerCase(); };
             obj->setProperty ("bg", hex (p.bg));
             obj->setProperty ("panel", hex (p.panel));
@@ -283,6 +456,7 @@ namespace vlab::ui
             juce::var root (obj.release());
             file.replaceWithText (juce::JSON::toString (root));
             loadedThemes[name.toStdString()] = p; // also register in-memory immediately
+            lastFolderStamp = folderStamp (folder);
             return file;
         }
 
@@ -317,6 +491,20 @@ namespace vlab::ui
     private:
         LookAndFeel& lnf;
         std::map<std::string, Palette> builtins;
+        juce::StringArray report;
+        mutable std::map<std::string, ThemeInfo> infos;
+        std::map<std::string, juce::File> themeFiles;
+        mutable juce::String lastFolderStamp;
+
+        static juce::String folderStamp (const juce::File& folder)
+        {
+            juce::String stamp;
+            if (folder.isDirectory())
+                for (auto& f : folder.findChildFiles (juce::File::findFiles, false, "*.theme.json"))
+                    stamp << f.getFileName() << ":" << f.getLastModificationTime().toMilliseconds() << ":" << f.getSize() << ";";
+            return stamp;
+        }
+
         mutable std::map<std::string, Palette> loadedThemes; // mutable: saveThemeToFile registers while being logically const w.r.t. builtins
         juce::String lastAppliedThemeName = "Default Green";
     };
