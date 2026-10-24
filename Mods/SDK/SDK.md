@@ -17,7 +17,7 @@ image/GIF feature they're often used alongside.
 
 ### 1.1 Where they run
 
-`AudioEngine::process()` runs a fixed pipeline: noise gate -> soundboard/TTS
+`AudioEngine::process()` runs a fixed pipeline: voice isolation (RNNoise) -> autotune -> soundboard/TTS
 mix-in -> gain -> EQ -> compressor -> pitch -> distortion/bitcrush/tremolo
 -> stutter/ring-mod -> chorus/phaser/flanger/auto-wah (budget-gated) ->
 delay (budget-gated) -> loud-mic limiter -> **your mods run here** -> MIDI
@@ -200,8 +200,9 @@ is a flat set of hex colours, plus an optional cursor:
 Colours accept `#RRGGBB` (treated as fully opaque) or `#AARRGGBB` if you
 want a specific colour to be semi-transparent, `accentGlow` is the one
 that's normally meant to be translucent. Any key you omit falls back to
-the current value, so a one-line theme that only overrides `accent` is
-completely valid (see `examples/themes/minimal_override.theme.json`).
+the default palette's value, so a one-line theme that only overrides
+`accent` is completely valid (see `examples/themes/minimal_override.theme.json`).
+Since 1.9.7 there's a lot more you can do, see 2.5.
 
 Name the file `*.theme.json` and drop it in `mods/themes`. It appears in
 the Theme dropdown under Settings -> General alongside the built-in
@@ -331,6 +332,58 @@ presets combine into sixty-six looks instead of eleven.
 Because they're not mod-loadable, UI Presets aren't documented here as a
 JSON schema, see `UI/UiPresetManager.h` in source if you want to see or
 add to the built-in list, that's a source change, not a mod.
+
+### 2.5 Theme API v2 (1.9.7)
+
+Everything above still works exactly as it did. These are additions, all
+optional.
+
+**Metadata.** `schema` (put `2`), `author`, `description`, `version`. They
+show up through the `list_themes` app command and get kept when the Theme
+Creator re-saves the file.
+
+**`extends`.** Name another theme, built in or a mod, and start from it:
+
+```json
+{ "name": "Ocean Blue But Hot Pink", "extends": "Ocean Blue", "accent": "#ff4fd8" }
+```
+
+Anything you don't list comes from the parent. Chains work up to 8 deep,
+loops are caught and reported. If the parent isn't found the theme still
+loads, from the default palette, and the problem shows up in the report
+(below).
+
+**Colours you leave out get worked out.** If a theme doesn't `extend`
+anything, then whatever it omits is derived from what it did give:
+
+- gave `bg` but no `panel` / `panelAlt` / `stroke` -> blended from `bg` towards `text`
+- gave `text` but no `textDim` -> `text` blended back towards `bg`
+- gave `accent` but no `accentDim` / `accentGlow` -> blended towards `bg`, and a translucent copy
+
+So `{ "bg": ..., "text": ..., "accent": ... }` is a complete, coherent theme.
+See `examples/themes/three_colours.theme.json`.
+
+**More colour formats.** `#rgb`, `#rrggbb`, `#aarrggbb` (alpha first, like
+always), `rgb(255, 79, 216)`, `rgba(255, 79, 216, 0.35)` (alpha 0 to 1) and
+plain colour names like `hotpink`. See `examples/themes/named_colours_and_preset.theme.json`.
+
+**`uiPreset`.** A theme can ask to be shown with one of the built-in UI
+Presets (2.3), e.g. `"uiPreset": "Vapor Deck"`. It's only applied when the
+user has "A theme can switch the UI preset" turned on in Settings -> General
+(on by default), and an unknown preset name is just ignored. This doesn't
+make UI presets moddable, a theme can only pick from the built-in list.
+
+**Problems get reported, not silently eaten.** Unknown keys, colours that
+can't be read, bad `extends`, files that aren't valid JSON, none of them stop
+the rest of the theme from loading, but they're listed when you press
+Settings -> General -> **Check Themes for Problems**.
+
+**Live reload.** vlab checks `mods/themes` every couple of seconds. Save
+a `.theme.json` and the active theme updates on its own, no Reload All Mods
+needed. Handy with a text editor open next to the app.
+
+App mods can use themes too, see `list_themes`, `get_theme`, `set_theme` and
+`set_ui_preset` in 5.2.
 
 ### 2.4 Building themes without writing JSON by hand
 
@@ -579,6 +632,24 @@ for their exact shapes; a mod with no canvas can skip all four.
   - `"reset_synth_patch"` -> puts every Synth tab param back to its
     default and stops whatever's currently playing (arp/song/held
     tone). Returns `"true"`.
+
+  Added in 1.9.7:
+  - `"list_themes"` -> JSON array of `{ "name", "builtIn", "author",
+    "description" }`.
+  - `"get_theme"` -> JSON of the active theme: `name` plus `bg`, `panel`,
+    `panelAlt`, `stroke`, `accent`, `accentDim`, `accent2`, `text`,
+    `textDim`, `danger` as `#aarrggbb` strings.
+  - `"set_theme"` with `argJson` = a theme name (plain string) -> applies
+    it and remembers it, `"true"`/`"false"`. Honours the theme's own
+    `uiPreset` request if the user allows that.
+  - `"set_ui_preset"` with `argJson` = a preset name -> `"true"`/`"false"`.
+  - `"list_synth_presets"` -> JSON array of the Synth tab's preset names
+    (built in ones first, then the user's own from `synth_presets/`).
+  - `"load_synth_preset"` with `argJson` = a preset name -> `"true"`.
+  - `"set_relax_mode"` with `argJson` = `"true"` or `"false"` -> goes in or
+    out of relax mode (the fullscreen visualizer), returns the new state.
+  - `"list_keybinds"` -> JSON array of `{ "owner", "combo" }` for every
+    keybind the user has set, same list as Settings -> Keybinds.
 
   New commands get added here over time without breaking the ABI for App
   Mods already built against an older vlab, an unrecognized command name
