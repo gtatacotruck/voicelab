@@ -2,8 +2,8 @@
 #include <juce_core/juce_core.h>
 #include <vector>
 
-// Soundboard routing. A route is a named point in the voice chain where the soundboard is mixed in;
-// everything after that point also processes it. Route 1 = after FX, Route 2 = start of chain.
+// a route is a spot in the voice chain where the soundboard gets mixed in, everything after that spot
+// affects it too. route 1 = after the FX, route 2 = start of the chain.
 namespace vlab
 {
     enum SoundboardInjectPoint : int
@@ -33,7 +33,7 @@ namespace vlab
             "After Experimental FX (voice FX skipped)",
             "End of chain (before Master Out Gain)",
         };
-        return names[juce::jlimit (0, (int) kSbNumPoints - 1, p)];  // fell asleep here so may be lower quality.
+        return names[juce::jlimit (0, (int) kSbNumPoints - 1, p)];
     }
 
     struct SoundboardRoute
@@ -69,7 +69,6 @@ namespace vlab
             return -1;
         }
 
-        // -1 if the name is empty or taken
         int add (const juce::String& name, int injectPoint)
         {
             const auto clean = name.trim();
