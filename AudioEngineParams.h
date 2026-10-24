@@ -1,352 +1,166 @@
 #pragma once
-#include "DSP/Common.h"
-#include "DSP/Helpers.h"
-#include "DSP/Reverb.h"
-#include "DSP/ModFx.h"
-#include "DSP/PitchShifter.h"
-#include "DSP/Compressor.h"
-#include "DSP/ThreeBandEq.h"
-#include "DSP/Experimental.h"
-#include "DSP/HeadSpacePanner.h"
-#include "DSP/GlitchFx.h"
-#include "DSP/VanillaFx.h"
-#include "DSP/AutoTune.h"
-#include "SoundboardRoutes.h"
-#include "AudioEngineParams.h"
-#include <deque>
-#include <cmath>
+#include <atomic>
+#include <new>
 
 namespace vlab
 {
-    class AudioEngine
+    struct AudioEngineParams
     {
-    public:
-        AudioEngineParams params;
-        std::atomic<bool> monitoring { false };
+        std::atomic<float> gain { 0.0f }, pitch { 0.0f }, pan { 0.0f };
+        std::atomic<float> masterOutGain { 0.0f };
 
-        // v1.9.6: where in the voice chain the soundboard is mixed in (a vlab::SoundboardInjectPoint). Default is the
-        // original behaviour: after the voice FX. Deliberately NOT part of `params`, so "Reset All FX" and FX
-        // presets never silently re-route the soundboard.
-        std::atomic<int> sbInjectPoint { kSbAfterExperimental };
-        dsp::AutoTune autoTune; // readouts (detected/target note) are atomics inside it, for the UI
+        // voice isolation replacing noise gatate
+        std::atomic<bool>  voiceIsolationEnabled { false };
+        std::atomic<float> voiceIsolationStrength { 1.0f };
+        std::atomic<float> voiceIsolationReduceDb { 30.0f };
+        std::atomic<float> voiceIsolationSensitivity { 0.45f };
 
-        std::function<void (vlab::AudioBuffer&, int)> soundboardTtsMix;   // sb.get_audio_mix(include_sb=False, include_tts=True)
-        std::function<void (vlab::AudioBuffer&, int)> soundboardMix;      // sb.get_audio_mix(include_sb=True,  include_tts=False)
-        std::function<bool()>                          synthRunning;
-        std::function<void (vlab::AudioBuffer&, int)>  synthProcess;
-        std::function<void (vlab::AudioBuffer&, int)>  midiInstrumentMix;
-        std::function<void (vlab::AudioBuffer&, int)>  modProcess; // wired to ModHost::process from Main.cpp
-        std::function<void (vlab::AudioBuffer&, int)>  browserAudioMix; // wired to SystemAudioCapture::pull from Main.cpp
+        std::atomic<float> sbSpeed { 1.0f }, sbVol { 1.0f };
+        std::atomic<bool>  sbLoop { false }, sbReverse { false };
+        std::atomic<float> sbReverb { 0.0f };
 
-        void prepare (double sampleRateIn, int blockSize)
-        {
-            juce::ignoreUnused (sampleRateIn, blockSize); // engine is fixed at vlab::kSampleRate, same as the Python (SR=44100)
-            cbTimes.clear();
-        }
+        std::atomic<float> distortion { 0.0f };
 
-        void process (const vlab::AudioBuffer& in, vlab::AudioBuffer& out, int numSamples)
-        {
-            const auto t0 = juce::Time::getHighResolutionTicks();
+        std::atomic<float> chorusRate { 1.0f }, chorusDepth { 0.5f }, chorusMix { 0.0f };
+        std::atomic<float> phaserRate { 1.0f }, phaserDepth { 0.5f }, phaserMix { 0.0f };
+        std::atomic<float> tremoloRate { 5.0f }, tremoloDepth { 0.0f };
+        std::atomic<float> delayTime { 0.3f }, delay2Time { 0.6f };
+        std::atomic<float> delayFeedback { 0.3f }, delayMix { 0.0f };
+        std::atomic<float> reverbMix { 0.0f }, reverbDecay { 0.5f };
 
-            out.makeCopyOf (in, true);
-            if (out.getNumChannels() == 1)
-            {
-                out.setSize (2, numSamples, true, true, true);
-                out.copyFrom (1, 0, out, 0, 0, numSamples);
-            }
+        std::atomic<float> compThreshold { 0.7f }, compRatio { 4.0f };
+        std::atomic<float> compAttack { 0.01f }, compRelease { 0.1f };
 
-            // ── noise gate ──────────────────────────────────────────────
-            const float gate = params.noiseGate.load();
-            if (gate > 0.0f)
-            {
-                for (int ch = 0; ch < 2; ++ch)
-                {
-                    auto* d = out.getWritePointer (ch);
-                    for (int i = 0; i < numSamples; ++i)
-                    {
-                        const float amp = std::abs (d[i]);
-                        if (amp < gate)
-                            d[i] *= amp / std::max (gate, 1e-9f);
-                    }
-                }
-            }
+        std::atomic<float> eqLo { 0.0f }, eqMid { 0.0f }, eqHi { 0.0f };
+        std::atomic<float> bitcrush { 0.0f };
 
-            // ── autotune (mic only, so it runs before anything else is mixed in) ──
-            if (params.autotuneEnabled.load())
-            {
-                if (! autotuneWasOn) { autoTune.reset(); autotuneWasOn = true; }
-                dsp::AutoTune::Settings at;
-                at.key = params.autotuneKey.load();
-                at.scale = params.autotuneScale.load();
-                at.retuneMs = params.autotuneRetuneMs.load();
-                at.amount = params.autotuneAmount.load();
-                at.refHz = params.autotuneRefHz.load();
-                constexpr int kChunk = 1024;
-                float mono[kChunk], tuned[kChunk];
-                auto* l = out.getWritePointer (0);
-                auto* r = out.getWritePointer (1);
-                for (int base = 0; base < numSamples; base += kChunk)
-                {
-                    const int n = std::min (kChunk, numSamples - base);
-                    for (int i = 0; i < n; ++i)
-                        mono[i] = 0.5f * (l[base + i] + r[base + i]);
-                    autoTune.process (mono, tuned, n, at);
-                    for (int i = 0; i < n; ++i)
-                        l[base + i] = r[base + i] = tuned[i];
-                }
-            }
-            else if (autotuneWasOn)
-            {
-                autotuneWasOn = false;
-                autoTune.reset();
-            }
+        std::atomic<bool>  loudMicBypass { false };
+        std::atomic<float> limiterThreshold { 0.95f }, preLimiterGain { 1.0f };
+        std::atomic<float> postLimiterGain { 1.0f }, adaptiveHeadroom { 0.05f };
 
-            // ── soundboard injection (see SoundboardRoutes.h) ──────────
-            // The soundboard has to be pulled exactly once per block, so the route is read once and the mix happens
-            // at whichever stage boundary below matches it.
-            const int sbPoint = juce::jlimit (0, (int) kSbNumPoints - 1, sbInjectPoint.load());
-            auto injectSoundboard = [&] (int point)
-            {
-                if (point != sbPoint || ! soundboardMix)
-                    return;
-                scratch.clear();
-                soundboardMix (scratch, numSamples);
-                if (params.sbReverb.load() > 0.0f)
-                    sbSendReverb.process (scratch, params.sbReverb.load() * 0.5f, 0.5f, numSamples);
-                const float sbVol = params.sbVol.load();
-                for (int ch = 0; ch < 2; ++ch)
-                    out.addFrom (ch, 0, scratch, ch, 0, numSamples, sbVol);
-            };
+        std::atomic<float> midiVol { 0.8f };
 
-            // ── TTS + synth mix-in ──────────────────────────────────────
-            scratch.setSize (2, numSamples, false, true, true);
-            if (soundboardTtsMix) { scratch.clear(); soundboardTtsMix (scratch, numSamples); addInto (out, scratch, numSamples); }
-            if (synthRunning && synthRunning() && synthProcess) { scratch.clear(); synthProcess (scratch, numSamples); addInto (out, scratch, numSamples); }
-            injectSoundboard (kSbStartOfChain);
+        std::atomic<bool>  headSpaceEnabled { false };
+        std::atomic<float> headSpaceAzimuth { 0.0f }; // degrees, -180..180
+        std::atomic<float> headSpaceWidth { 0.8f };   // 0..1 effect strength
 
-            dsp::applyGain (out, params.gain.load(), numSamples);
+        // Experimental
+        std::atomic<bool>  expDeEsserEnabled { false };
+        std::atomic<float> expDeEsserAmount { 0.5f };
+        std::atomic<bool>  expAutoLevelEnabled { false };
+        std::atomic<float> expAutoLevelAmount { 0.7f };
+        std::atomic<bool>  expUnderwaterEnabled { false };
+        std::atomic<float> expUnderwaterAmount { 0.7f };
+        std::atomic<bool>  expPresenceEnabled { false };
+        std::atomic<float> expPresenceAmount { 0.5f };
+        std::atomic<bool>  expRadioSweepEnabled { false };
+        std::atomic<float> expRadioSweepRate { 0.3f }, expRadioSweepAmount { 0.7f };
+        std::atomic<bool>  expPumpEnabled { false };
+        std::atomic<float> expPumpRate { 2.0f }, expPumpDepth { 0.6f };
 
-            eq.process (out, params.eqLo.load(), params.eqMid.load(), params.eqHi.load(), numSamples);
+        // Glitch FX (new, no Python equivalent)
+        std::atomic<bool>  stutterEnabled { false };
+        std::atomic<int>   stutterType { 0 }; // see vlab::dsp::StutterType
+        std::atomic<float> stutterRate { 1.0f }; // roughly triggers/sec, average
+        std::atomic<float> stutterHoldMs { 120.0f };
+        std::atomic<float> stutterRandomness { 0.5f };
+        std::atomic<float> stutterMix { 0.0f };
+        std::atomic<float> ringModFreq { 30.0f };
+        std::atomic<float> ringModMix { 0.0f };
 
-            if (params.compRatio.load() > 1.0f)
-                comp.process (out, params.compThreshold.load(), params.compRatio.load(),
-                               params.compAttack.load(), params.compRelease.load(), numSamples);
-            injectSoundboard (kSbAfterEqComp);
+        std::atomic<bool>  escRepeatEnabled { false };
+        std::atomic<float> escRepeatHoldMs { 150.0f };
+        std::atomic<float> escRepeatGrowth { 1.3f };
+        std::atomic<float> escRepeatMix { 0.0f };
 
-            pitchScratch.setSize (2, numSamples, false, true, true);
-            shifter.process (out, pitchScratch, params.pitch.load(), numSamples);
-            out.makeCopyOf (pitchScratch, true);
-            if (params.vibratoDepth.load() > 0.0f)
-                vibrato.process (out, params.vibratoRate.load(), params.vibratoDepth.load(), numSamples);
-            injectSoundboard (kSbAfterPitch);
+        std::atomic<bool>  accRepeatEnabled { false };
+        std::atomic<float> accRepeatHoldMs { 200.0f };
+        std::atomic<float> accRepeatSpeedGrowth { 1.3f };
+        std::atomic<float> accRepeatMix { 0.0f };
 
-            const double budgetMs = (numSamples / vlab::kSampleRate) * 1000.0 * 0.8;
+        std::atomic<bool>  decRepeatEnabled { false };
+        std::atomic<float> decRepeatHoldMs { 200.0f };
+        std::atomic<float> decRepeatSpeedShrink { 0.8f };
+        std::atomic<float> decRepeatMix { 0.0f };
 
-            if (params.distortion.load() > 0.0f) dsp::applyDistortion (out, params.distortion.load(), numSamples);
-            if (params.bitcrush.load() > 0.0f)   dsp::applyBitcrush (out, params.bitcrush.load(), numSamples);
-            if (params.tremoloDepth.load() > 0.0f) tremolo.process (out, params.tremoloRate.load(), params.tremoloDepth.load(), numSamples);
-            injectSoundboard (kSbAfterDrive);
+        std::atomic<bool>  pitchDownRepeatEnabled { false };
+        std::atomic<float> pitchDownRepeatHoldMs { 200.0f };
+        std::atomic<float> pitchDownRepeatSemitones { 2.0f };
+        std::atomic<float> pitchDownRepeatMix { 0.0f };
 
-            stutter.process (out, params.stutterEnabled.load(), (dsp::StutterType) params.stutterType.load(),
-                              params.stutterRate.load(), params.stutterHoldMs.load(), params.stutterRandomness.load(),
-                              params.stutterMix.load(), numSamples);
-            ringMod.process (out, params.ringModFreq.load(), params.ringModMix.load(), numSamples);
-            escRepeat.process (out, params.escRepeatEnabled.load(), params.escRepeatHoldMs.load(),
-                                params.escRepeatGrowth.load(), params.escRepeatMix.load(), numSamples);
-            accRepeat.process (out, params.accRepeatEnabled.load(), params.accRepeatHoldMs.load(),
-                                params.accRepeatSpeedGrowth.load(), params.accRepeatMix.load(), numSamples);
-            decRepeat.process (out, params.decRepeatEnabled.load(), params.decRepeatHoldMs.load(),
-                                params.decRepeatSpeedShrink.load(), params.decRepeatMix.load(), numSamples);
-            pitchDownRepeat.process (out, params.pitchDownRepeatEnabled.load(), params.pitchDownRepeatHoldMs.load(),
-                                      params.pitchDownRepeatSemitones.load(), params.pitchDownRepeatMix.load(), numSamples);
-            scatter.process (out, params.scatterEnabled.load(), params.scatterGrainMs.load(), params.scatterMix.load(), numSamples);
-            reverseBursts.process (out, params.reverseBurstEnabled.load(), params.reverseBurstProbability.load(),
-                                    params.reverseBurstMs.load(), params.reverseBurstMix.load(), numSamples);
-            glitchGate.process (out, params.glitchGateEnabled.load(), params.glitchGateStepMs.load(),
-                                 params.glitchGateDensity.load(), params.glitchGateMix.load(), numSamples);
-            bufferFreeze.process (out, params.freezeEnabled.load(), params.freezeGrainMs.load(), params.freezeMix.load(), numSamples);
-            vinylStop.process (out, params.vinylStopEnabled.load(), params.vinylStopProbability.load(),
-                                params.vinylStopMs.load(), params.vinylStopMix.load(), numSamples);
-            brokenDelay.process (out, params.brokenDelayEnabled.load(), params.brokenDelayMs.load(),
-                                  params.brokenDelayFeedback.load(), params.brokenDelayJumpRate.load(),
-                                  params.brokenDelayMix.load(), numSamples);
-            pitchJumps.process (out, params.pitchJumpEnabled.load(), params.pitchJumpRate.load(),
-                                 params.pitchJumpMs.load(), params.pitchJumpSemitones.load(),
-                                 params.pitchJumpMix.load(), numSamples);
-            backmask.process (out, params.backmaskEnabled.load(), params.backmaskSegmentMs.load(),
-                               params.backmaskMix.load(), numSamples);
-            microFreeze.process (out, params.microFreezeEnabled.load(), params.microFreezeHoldMs.load(),
-                                  params.microFreezeDensity.load(), params.microFreezeMix.load(), numSamples);
-            bufferShuffle.process (out, params.bufferShuffleEnabled.load(), params.bufferShuffleHoldMs.load(),
-                                    params.bufferShuffleChunks.load(), params.bufferShuffleMix.load(), numSamples);
-            injectSoundboard (kSbAfterGlitch);
+        std::atomic<bool>  scatterEnabled { false };
+        std::atomic<float> scatterGrainMs { 60.0f };
+        std::atomic<float> scatterMix { 0.0f };
 
-            if (elapsedMs (t0) < budgetMs * 0.6)
-            {
-                if (params.chorusMix.load() > 0.0f) chorus.process (out, params.chorusRate.load(), params.chorusDepth.load(), params.chorusMix.load(), numSamples);
-                if (params.phaserMix.load() > 0.0f) phaser.process (out, params.phaserRate.load(), params.phaserDepth.load(), params.phaserMix.load(), numSamples);
-                if (params.flangerMix.load() > 0.0f) flanger.process (out, params.flangerRate.load(), params.flangerDepth.load(), params.flangerFeedback.load(), params.flangerMix.load(), numSamples);
-                if (params.autoWahMix.load() > 0.0f) autoWah.process (out, params.autoWahSensitivity.load(), params.autoWahRate.load(), params.autoWahDepth.load(), params.autoWahMix.load(), numSamples);
-                if (params.telephoneMix.load() > 0.0f) telephone.process (out, params.telephoneMix.load(), numSamples);
-                if (params.doublerMix.load() > 0.0f) doubler.process (out, params.doublerDetuneCents.load(), params.doublerDelayMs.load(), params.doublerMix.load(), numSamples);
-            }
-            if (elapsedMs (t0) < budgetMs * 0.75)
-            {
-                if (params.delayMix.load() > 0.0f)
-                    delayFx.process (out, params.delayTime.load(), params.delay2Time.load(),
-                                      params.delayFeedback.load(), params.delayMix.load(), numSamples);
-            }
-            injectSoundboard (kSbAfterModDelay);
+        // Reverse Bursts: short random bursts, captured then played backwards.
+        std::atomic<bool>  reverseBurstEnabled { false };
+        std::atomic<float> reverseBurstProbability { 0.5f };
+        std::atomic<float> reverseBurstMs { 200.0f };
+        std::atomic<float> reverseBurstMix { 0.0f };
 
-            // ── pre-limiter ("loud mic bypass") ─────────────────────────
-            if (params.loudMicBypass.load())
-            {
-                const float h = params.adaptiveHeadroom.load();
-                const float th = params.limiterThreshold.load();
-                dsp::applyGain (out, juce::Decibels::gainToDecibels (params.preLimiterGain.load()), numSamples);
-                for (int ch = 0; ch < 2; ++ch)
-                {
-                    auto* d = out.getWritePointer (ch);
-                    for (int i = 0; i < numSamples; ++i)
-                        d[i] = std::tanh (d[i] * 0.8f / (th + h)) * (th + h);
-                }
-                dsp::applyGain (out, juce::Decibels::gainToDecibels (params.postLimiterGain.load()), numSamples);
-            }
+        // Glitch Gate: chops audio into steps, randomly mutes some hard.
+        std::atomic<bool>  glitchGateEnabled { false };
+        std::atomic<float> glitchGateStepMs { 80.0f };
+        std::atomic<float> glitchGateDensity { 0.4f };
+        std::atomic<float> glitchGateMix { 0.0f };
 
-            if (modProcess) modProcess (out, numSamples);
-            // ── MIDI instrument mix ──────────────────────────────────────
-            if (midiInstrumentMix) { scratch.clear(); midiInstrumentMix (scratch, numSamples); addInto (out, scratch, numSamples); }
-            injectSoundboard (kSbAfterLimiterMods);
+        // Buffer Freeze: loops a single grain infinitely while enabled.
+        std::atomic<bool>  freezeEnabled { false };
+        std::atomic<float> freezeGrainMs { 150.0f };
+        std::atomic<float> freezeMix { 1.0f };
 
-            // ── experimental fx block ────────────────────────────────────
-            expFx.process (out, numSamples,
-                params.expDeEsserEnabled.load(), params.expDeEsserAmount.load(),
-                params.expAutoLevelEnabled.load(), params.expAutoLevelAmount.load(),
-                params.expUnderwaterEnabled.load(), params.expUnderwaterAmount.load(),
-                params.expPresenceEnabled.load(), params.expPresenceAmount.load(),
-                params.expRadioSweepEnabled.load(), params.expRadioSweepRate.load(), params.expRadioSweepAmount.load(),
-                params.expPumpEnabled.load(), params.expPumpRate.load(), params.expPumpDepth.load());
+        std::atomic<bool>  vinylStopEnabled { false };
+        std::atomic<float> vinylStopProbability { 0.3f };
+        std::atomic<float> vinylStopMs { 500.0f };
+        std::atomic<float> vinylStopMix { 0.0f };
 
-            // ── soundboard mix, Route 1 (with its own send-reverb, see injectSoundboard above) ──
-            injectSoundboard (kSbAfterExperimental);
+        // Broken Delay: a delay whose tap time randomly jumps around.
+        std::atomic<bool>  brokenDelayEnabled { false };
+        std::atomic<float> brokenDelayMs { 300.0f };
+        std::atomic<float> brokenDelayFeedback { 0.35f };
+        std::atomic<float> brokenDelayJumpRate { 1.0f };
+        std::atomic<float> brokenDelayMix { 0.0f };
 
-            if (browserAudioMix)
-            {
-                scratch.clear();
-                browserAudioMix (scratch, numSamples);
-                for (int ch = 0; ch < 2; ++ch)
-                    out.addFrom (ch, 0, scratch, ch, 0, numSamples, params.browserAudioVol.load());
-            }
+        // Pitch Jumps: brief, random, stepped pitch shifts.
+        std::atomic<bool>  pitchJumpEnabled { false };
+        std::atomic<float> pitchJumpRate { 1.0f };
+        std::atomic<float> pitchJumpMs { 150.0f };
+        std::atomic<float> pitchJumpSemitones { 12.0f };
+        std::atomic<float> pitchJumpMix { 0.0f };
 
-            dsp::applyPan (out, params.pan.load(), numSamples);
-            if (params.autoPanDepth.load() > 0.0f)
-                autoPan.process (out, params.autoPanRate.load(), params.autoPanDepth.load(), numSamples);
+        // Backmask: continuously alternating forward/reverse segments.
+        std::atomic<bool>  backmaskEnabled { false };
+        std::atomic<float> backmaskSegmentMs { 200.0f };
+        std::atomic<float> backmaskMix { 0.0f };
 
-            if (params.headSpaceEnabled.load())
-                headSpace.process (out, params.headSpaceAzimuth.load(), params.headSpaceWidth.load(), numSamples);
+        // Micro Freeze: rapid continuous tiny sample-and-hold texture.
+        std::atomic<bool>  microFreezeEnabled { false };
+        std::atomic<float> microFreezeHoldMs { 8.0f };
+        std::atomic<float> microFreezeDensity { 0.4f };
+        std::atomic<float> microFreezeMix { 0.0f };
 
-            if (elapsedMs (t0) < budgetMs * 0.85 && params.reverbMix.load() > 0.0f)
-                reverb.process (out, params.reverbMix.load(), params.reverbDecay.load(), numSamples);
-            injectSoundboard (kSbBeforeMaster);
+        std::atomic<bool>  bufferShuffleEnabled { false };
+        std::atomic<float> bufferShuffleHoldMs { 500.0f };
+        std::atomic<int>   bufferShuffleChunks { 8 };
+        std::atomic<float> bufferShuffleMix { 0.0f };
 
-            dsp::applyGain (out, params.masterOutGain.load(), numSamples);
+        // Vanilla FX (new, no Python equivalent)
+        std::atomic<float> flangerRate { 0.3f }, flangerDepth { 0.5f }, flangerFeedback { 0.3f }, flangerMix { 0.0f };
+        std::atomic<float> autoWahSensitivity { 1.0f }, autoWahRate { 0.5f }, autoWahDepth { 0.3f }, autoWahMix { 0.0f };
+        std::atomic<float> vibratoRate { 5.0f }, vibratoDepth { 0.0f };
+        std::atomic<float> autoPanRate { 0.5f }, autoPanDepth { 0.0f };
+        std::atomic<float> telephoneMix { 0.0f };
+        std::atomic<float> doublerDetuneCents { 12.0f }, doublerDelayMs { 18.0f }, doublerMix { 0.0f };
 
-            if (params.loudMicBypass.load())
-            {
-                const float ceiling = params.limiterThreshold.load() - params.adaptiveHeadroom.load();
-                for (int ch = 0; ch < 2; ++ch)
-                {
-                    auto* d = out.getWritePointer (ch);
-                    for (int i = 0; i < numSamples; ++i)
-                        d[i] = std::tanh (d[i] / std::max (0.001f, ceiling)) * ceiling;
-                }
-            }
+        std::atomic<float> browserAudioVol { 0.8f };
 
-            for (int ch = 0; ch < 2; ++ch)
-                out.applyGainRamp (ch, 0, numSamples, 1.0f, 1.0f); // no-op ramp keeps buffer touched for denormal flush
-            for (int ch = 0; ch < 2; ++ch)
-            {
-                auto* d = out.getWritePointer (ch);
-                for (int i = 0; i < numSamples; ++i)
-                    d[i] = juce::jlimit (-1.0f, 1.0f, d[i]);
-            }
+        std::atomic<bool>  autotuneEnabled { false };
+        std::atomic<int>   autotuneKey { 0 };
+        std::atomic<int>   autotuneScale { 0 };
+        std::atomic<float> autotuneRetuneMs { 20.0f };
+        std::atomic<float> autotuneAmount { 1.0f };
+        std::atomic<float> autotuneRefHz { 440.0f };
 
-            vuPeakL = out.getMagnitude (0, 0, numSamples);
-            vuPeakR = out.getMagnitude (1, 0, numSamples);
-            visData.assign (out.getReadPointer (0), out.getReadPointer (0) + numSamples);
-            visDataR.assign (out.getReadPointer (1), out.getReadPointer (1) + numSamples);
-
-            const double elapsed = elapsedMs (t0);
-            cpuPercent.store (juce::jlimit (0.0f, 100.0f, (float) (elapsed / std::max (0.001, budgetMs / 0.8) * 100.0)));
-            cbTimes.push_back (elapsed);
-            if (cbTimes.size() > 20) cbTimes.pop_front();
-            const bool wasOverload = overload;
-            if (cbTimes.size() == 20)
-            {
-                double sum5 = 0.0;
-                for (size_t i = cbTimes.size() - 5; i < cbTimes.size(); ++i) sum5 += cbTimes[i];
-                overload = (sum5 / 5.0) > budgetMs * 0.9;
-            }
-            if (overload != wasOverload && overloadCallback)
-                overloadCallback (overload);
-        }
-
-        std::function<void (bool)> overloadCallback; // UI hook, mirrors self.engine._overload_cb
-        float vuPeakL = 0.0f, vuPeakR = 0.0f;
-        std::atomic<float> cpuPercent { 0.0f };
-        std::vector<float> visData;
-        std::vector<float> visDataR;
-
-    private:
-        dsp::Reverb reverb;
-        dsp::Reverb sbSendReverb; // v1.9.6: the soundboard's send reverb used to share state with the master reverb above
-        bool autotuneWasOn = false;
-        dsp::Chorus chorus;
-        dsp::Delay delayFx;
-        dsp::Phaser phaser;
-        dsp::PitchShifter shifter;
-        dsp::Compressor comp;
-        dsp::ThreeBandEq eq;
-        dsp::Tremolo tremolo;
-        dsp::ExperimentalFx expFx;
-        dsp::HeadSpacePanner headSpace;
-        dsp::Stutter stutter;
-        dsp::RingModulator ringMod;
-        dsp::EscalatingRepeat escRepeat;
-        dsp::AcceleratingRepeat accRepeat;
-        dsp::DecelerateRepeat decRepeat;
-        dsp::RepeatPitchDown pitchDownRepeat;
-        dsp::Scatter scatter;
-        dsp::ReverseBursts reverseBursts;
-        dsp::GlitchGate glitchGate;
-        dsp::BufferFreeze bufferFreeze;
-        dsp::VinylStop vinylStop;
-        dsp::BrokenDelay brokenDelay;
-        dsp::PitchJumps pitchJumps;
-        dsp::Backmask backmask;
-        dsp::MicroFreeze microFreeze;
-        dsp::BufferShuffle bufferShuffle;
-        dsp::Flanger flanger;
-        dsp::AutoWah autoWah;
-        dsp::Vibrato vibrato;
-        dsp::AutoPan autoPan;
-        dsp::Telephone telephone;
-        dsp::Doubler doubler;
-
-        vlab::AudioBuffer scratch, pitchScratch;
-        std::deque<double> cbTimes;
-        bool overload = false;
-
-        static void addInto (vlab::AudioBuffer& dest, const vlab::AudioBuffer& src, int n)
-        {
-            for (int ch = 0; ch < 2; ++ch)
-                dest.addFrom (ch, 0, src, ch, 0, n);
-        }
-
-        static double elapsedMs (juce::int64 t0)
-        {
-            const auto t1 = juce::Time::getHighResolutionTicks();
-            return juce::Time::highResolutionTicksToSeconds (t1 - t0) * 1000.0;
-        }
+        void resetToDefaults() { new (this) AudioEngineParams(); }
     };
 }
