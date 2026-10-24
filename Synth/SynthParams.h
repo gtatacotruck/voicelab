@@ -53,6 +53,9 @@ namespace vlab
         std::atomic<float> chorusRate { 0.8f }, chorusDepth { 0.0f }, chorusMix { 0.0f };
         std::atomic<float> delayTimeMs { 280.0f }, delayFeedback { 0.3f }, delayMix { 0.0f };
 
+        std::atomic<float> reverbMix { 0.0f }, reverbDecay { 0.5f };
+        std::atomic<bool>  arpLatch { false };
+
         std::atomic<float> masterVol { 0.5f };
 
         void resetToDefaults()
@@ -81,6 +84,8 @@ namespace vlab
 
             chorusRate = 0.8f; chorusDepth = 0.0f; chorusMix = 0.0f;
             delayTimeMs = 280.0f; delayFeedback = 0.3f; delayMix = 0.0f;
+
+            reverbMix = 0.0f; reverbDecay = 0.5f; arpLatch = false;
 
             masterVol = 0.5f;
         }
