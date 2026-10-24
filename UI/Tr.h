@@ -1,8 +1,7 @@
 #pragma once
 #include <juce_core/juce_core.h>
 #include <functional>
-
-// Global hook so UI code can translate a literal English string without a TranslationManager pointer...
+//dont neglect me papa
 namespace vlab::ui
 {
     inline std::function<juce::String (const juce::String&)>& translateHook()
