@@ -14,7 +14,7 @@ namespace vlab::ui
         // denser one-line rows of the new UI in one go (see MainComponent::applyUiMode()).
         static inline bool compactMode = false;
 
-
+        // false = the wheel scrolls the page instead of moving sliders/combos
         static inline bool sliderWheelEnabled = false;
 
         FxSection (juce::String titleIn, juce::String glyphText)
@@ -121,7 +121,6 @@ namespace vlab::ui
             resized();
         }
 
-
         void retranslate()
         {
             for (auto& row : rows)
@@ -144,7 +143,6 @@ namespace vlab::ui
             repaint();
         }
 
-        // Every English string this section can show, used by Settings > "Export Language Template".
         void collectTranslatableText (juce::StringArray& out) const
         {
             out.addIfNotAlreadyThere (title);
@@ -158,7 +156,6 @@ namespace vlab::ui
             }
         }
 
-        // Custom components can carry their own labels/buttons, so the app-wide translation pass needs to reach them.
         void forEachCustomComponent (const std::function<void (juce::Component&)>& fn)
         {
             for (auto& row : rows)
@@ -307,11 +304,11 @@ namespace vlab::ui
             juce::ToggleButton toggle;
             juce::ComboBox combo;
             juce::TextButton button;
-            juce::Component* customComp = nullptr; 
+            juce::Component* customComp = nullptr; // not owned, see addCustomComponent()
             int customHeight = 0;
-            juce::String baseText;         
-            int decimals = 2;              
-            juce::StringArray comboOptions;   
+            juce::String baseText; // english caption, also the translation key
+            int decimals = 2;
+            juce::StringArray comboOptions;
         };
         std::vector<std::unique_ptr<Row>> rows;
 
