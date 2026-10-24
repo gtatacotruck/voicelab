@@ -1,6 +1,7 @@
 #pragma once
-// Autotune: YIN pitch detection, snap to scale, TD-PSOLA resynthesis. No JUCE dependency.
-// Mono, fixed latency of kLatencySamples. Unvoiced parts pass through the delayed dry signal. untested...test more later.
+// autotune: YIN pitch detection -> snap to scale -> TD-PSOLA. mono, no JUCE needed.
+// unvoiced bits (breaths, s/t sounds) go through as delayed dry signal.
+// Dont neglect me papa
 #include <array>
 #include <atomic>
 #include <algorithm>
@@ -30,12 +31,12 @@ namespace vlab::dsp
 
         struct Settings
         {
-            int   key = 0;            // 0 = C
+            int   key = 0;
             int   scale = Chromatic;
-            float retuneMs = 20.0f;   // 0 = instant
+            float retuneMs = 20.0f;
             float amount = 1.0f;
             float refHz = 440.0f;
-            float maxShiftSemis = 6.0f; // bigger corrections are ignored
+            float maxShiftSemis = 6.0f;
         };
 
         static constexpr int kLatencySamples = 1280;
@@ -160,7 +161,7 @@ namespace vlab::dsp
                 decRing[(size_t) (decIdx++ & kDecMask)] = lp;
         }
 
-        // ── YIN ──────────────────────────────────────────────────────────────
+        // YIN
         void runDetection()
         {
             constexpr int needed = kWin + kTauMax + 1;
@@ -197,7 +198,7 @@ namespace vlab::dsp
                 cmnd[(size_t) tau] = running > 1e-12 ? (float) (d[(size_t) tau] * tau / running) : 1.0f;
             }
 
-            // first dip under the threshold, then down to its minimum (avoids octave errors)
+            // first dip under the threshold, then follow it down
             constexpr float kThreshold = 0.20f;
             int best = -1;
             for (int tau = kTauMin; tau < kTauMax; ++tau)
@@ -241,7 +242,7 @@ namespace vlab::dsp
             else
             {
                 medianHist = { 0.0f, 0.0f, 0.0f };
-                // hold the last pitch for a couple of failed frames
+                // hang on to the last pitch for a couple of bad frames
                 if (++unvoicedRun <= 2)
                 {
                     const Hop& prev = hops[(size_t) ((hopCount + kHopHistory - 1) % kHopHistory)];
@@ -266,7 +267,7 @@ namespace vlab::dsp
             return hops[(size_t) (i % kHopHistory)];
         }
 
-        // ── musical logic ────────────────────────────────────────────────────
+        // musical logic
         static unsigned scaleMask (int scale)
         {
             auto m = [] (std::initializer_list<int> notes) { unsigned r = 0; for (int n : notes) r |= 1u << n; return r; };
@@ -329,7 +330,7 @@ namespace vlab::dsp
             return std::exp2 (shift / 12.0f);
         }
 
-        // ── PSOLA ────────────────────────────────────────────────────────────
+        // PSOLA
         float readInput (double pos) const
         {
             const int64_t i0 = (int64_t) std::floor (pos);
